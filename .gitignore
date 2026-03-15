@@ -1,0 +1,13 @@
+# Rust build artifacts
+/target/
+
+# Rust/Cargo
+**/*.rs.bk
+
+# IDE and OS files
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db

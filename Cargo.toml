@@ -1,0 +1,26 @@
+[package]
+name = "filecrypt"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+description = "Cross-platform CLI for password-based file encryption and decryption"
+license = "MIT"
+readme = "README.md"
+keywords = ["encryption", "cli", "aes-gcm", "argon2", "security"]
+categories = ["command-line-utilities", "cryptography"]
+autobins = false
+
+[[bin]]
+name = "fcrypt"
+path = "src/main.rs"
+
+[dependencies]
+aes-gcm = "0.10.3"
+argon2 = "0.5.3"
+clap = { version = "4.5.38", features = ["derive"] }
+indicatif = "0.17.11"
+rand = "0.8.5"
+rpassword = "7.3.1"
+tempfile = "3.13.0"
+thiserror = "1.0.64"
+zeroize = "1.8.1"
