@@ -19,7 +19,7 @@ aes-gcm = "0.10.3"
 argon2 = "0.5.3"
 clap = { version = "4.5.38", features = ["derive"] }
 indicatif = "0.17.11"
-rand = "0.8.5"
+rand = "0.10.0"
 rpassword = "7.3.1"
 tempfile = "3.13.0"
 thiserror = "1.0.64"
