@@ -7,6 +7,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+- Added GitHub Actions automation for signed `.deb` and `.rpm` packages, APT/RPM repository publication through GitHub Pages, and Sigstore bundle generation for package artifacts.
+
 ## [0.1.2] - 2026-05-17
 
 ### Security

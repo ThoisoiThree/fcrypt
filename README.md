@@ -40,6 +40,31 @@ Binary output:
 - Linux/macOS: `target/release/fcrypt`
 - Windows: `target/release/fcrypt.exe`
 
+## Package repositories
+
+APT and RPM repositories are published from the `Package Repositories` GitHub Actions workflow when repository GPG signing secrets are configured.
+
+Ubuntu/Debian:
+
+```bash
+curl -fsSL https://thoisoithree.github.io/fcrypt/apt/fcrypt-packaging.asc \
+  | sudo gpg --dearmor -o /usr/share/keyrings/fcrypt-archive-keyring.gpg
+echo "deb [arch=amd64 signed-by=/usr/share/keyrings/fcrypt-archive-keyring.gpg] https://thoisoithree.github.io/fcrypt/apt stable main" \
+  | sudo tee /etc/apt/sources.list.d/fcrypt.list
+sudo apt update
+sudo apt install fcrypt
+```
+
+Fedora/RHEL-compatible:
+
+```bash
+sudo curl -fsSL -o /etc/yum.repos.d/fcrypt.repo \
+  https://thoisoithree.github.io/fcrypt/rpm/fcrypt.repo
+sudo dnf install fcrypt
+```
+
+Details: see `docs/PACKAGE_REPOSITORIES.md`.
+
 ## Usage
 
 Show help:
@@ -103,5 +128,6 @@ Included tests cover:
 - CI (`.github/workflows/ci.yml`) validates format, clippy, tests, and release build on Linux/macOS/Windows.
 - Tagging a release (`vX.Y.Z`) triggers `.github/workflows/release.yml`.
 - Release workflow builds platform binaries, packages artifacts, creates SHA-256 checksums, and publishes a GitHub Release.
+- Package repository workflow builds signed `.deb` and `.rpm` packages, attaches them to tag releases, and publishes APT/RPM repositories to GitHub Pages.
 
 Detailed steps: see `RELEASE.md`.

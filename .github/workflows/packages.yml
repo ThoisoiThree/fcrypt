@@ -1,0 +1,133 @@
+name: Package Repositories
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref to package"
+        required: false
+        default: "main"
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: package-repositories
+  cancel-in-progress: false
+
+env:
+  PAGES_BASE_URL: https://thoisoithree.github.io/fcrypt
+
+jobs:
+  build-sign-publish:
+    name: Build, Sign, and Publish Package Repositories
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y apt-utils createrepo-c dpkg-dev gnupg rpm
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Build DEB and RPM packages
+        run: bash packaging/scripts/build-linux-packages.sh dist/packages
+
+      - name: Validate GPG signing secrets
+        env:
+          PACKAGING_GPG_PRIVATE_KEY: ${{ secrets.PACKAGING_GPG_PRIVATE_KEY }}
+          PACKAGING_GPG_PASSPHRASE: ${{ secrets.PACKAGING_GPG_PASSPHRASE }}
+        run: |
+          if [ -z "${PACKAGING_GPG_PRIVATE_KEY}" ] || [ -z "${PACKAGING_GPG_PASSPHRASE}" ]; then
+            echo "::error::Set PACKAGING_GPG_PRIVATE_KEY and PACKAGING_GPG_PASSPHRASE repository secrets before publishing package repositories."
+            exit 1
+          fi
+
+      - name: Import GPG key
+        env:
+          PACKAGING_GPG_PRIVATE_KEY: ${{ secrets.PACKAGING_GPG_PRIVATE_KEY }}
+        run: |
+          printf '%s' "$PACKAGING_GPG_PRIVATE_KEY" | gpg --batch --import
+          GPG_KEY_ID="$(gpg --batch --list-secret-keys --with-colons | awk -F: '/^sec:/ { print $5; exit }')"
+          if [ -z "$GPG_KEY_ID" ]; then
+            echo "::error::No secret GPG key was imported."
+            exit 1
+          fi
+          echo "GPG_KEY_ID=$GPG_KEY_ID" >> "$GITHUB_ENV"
+          gpg --armor --export "$GPG_KEY_ID" > dist/packages/fcrypt-packaging.asc
+
+      - name: Sign RPM packages
+        env:
+          PACKAGING_GPG_PASSPHRASE: ${{ secrets.PACKAGING_GPG_PASSPHRASE }}
+        run: |
+          cat > ~/.rpmmacros <<EOF
+          %_signature gpg
+          %_gpg_name $GPG_KEY_ID
+          %_gpg_path $HOME/.gnupg
+          %__gpg /usr/bin/gpg
+          %__gpg_check_password_cmd /bin/true
+          %__gpg_sign_cmd %{__gpg} gpg --batch --no-verbose --no-armor --pinentry-mode loopback --passphrase "$PACKAGING_GPG_PASSPHRASE" -u "%{_gpg_name}" -sbo %{__signature_filename} %{__plaintext_filename}
+          EOF
+          rpmsign --addsign dist/packages/*.rpm
+          rpm --checksig dist/packages/*.rpm
+          (cd dist/packages && sha256sum *.deb *.rpm > SHA256SUMS)
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Create detached GPG and Sigstore signatures
+        env:
+          PACKAGING_GPG_PASSPHRASE: ${{ secrets.PACKAGING_GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          for file in dist/packages/*.deb dist/packages/*.rpm dist/packages/SHA256SUMS; do
+            gpg --batch --yes --pinentry-mode loopback --passphrase "$PACKAGING_GPG_PASSPHRASE" \
+              --local-user "$GPG_KEY_ID" --armor --detach-sign "$file"
+            cosign sign-blob --yes --bundle "${file}.sigstore.json" "$file"
+          done
+
+      - name: Create APT and RPM repositories
+        env:
+          PACKAGING_GPG_PASSPHRASE: ${{ secrets.PACKAGING_GPG_PASSPHRASE }}
+        run: bash packaging/scripts/create-package-repos.sh dist/packages public "$PAGES_BASE_URL"
+
+      - name: Upload package release assets
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v3
+        with:
+          generate_release_notes: true
+          files: |
+            dist/packages/*
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: public
+
+      - name: Deploy Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

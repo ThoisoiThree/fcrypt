@@ -27,3 +27,21 @@ After pushing a `v*` tag, GitHub Actions `release.yml` will:
    - Windows (`x86_64-pc-windows-msvc`)
 2. Package binaries and generate SHA-256 checksum files.
 3. Publish a GitHub Release with attached artifacts.
+
+## 4. Package repositories
+
+GitHub Actions `packages.yml` can build and publish Linux package repositories:
+
+1. Build `fcrypt_<version>_amd64.deb`.
+2. Build `fcrypt-<version>-1.x86_64.rpm`.
+3. Sign package artifacts with detached GPG signatures and Sigstore keyless bundles.
+4. Publish APT repository metadata under GitHub Pages `/apt`.
+5. Publish RPM repository metadata under GitHub Pages `/rpm`.
+6. Attach package artifacts and signatures to tag releases.
+
+Before enabling this workflow, configure GitHub Pages to use GitHub Actions and add repository secrets:
+
+- `PACKAGING_GPG_PRIVATE_KEY`
+- `PACKAGING_GPG_PASSPHRASE`
+
+Detailed setup and install commands are in `docs/PACKAGE_REPOSITORIES.md`.
