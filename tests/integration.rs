@@ -251,9 +251,93 @@ fn empty_file_roundtrip() {
         .expect("metadata must be readable")
         .len();
     assert_eq!(
-        encrypted_len, FILE_PREFIX_LEN as u64,
-        "empty file should contain only binary prefix"
+        encrypted_len,
+        (FILE_PREFIX_LEN + TAG_LEN) as u64,
+        "empty file should contain binary prefix and authentication tag"
     );
+
+    let decrypted_bytes = fs::read(&decrypted).expect("decrypted file must be readable");
+    assert!(decrypted_bytes.is_empty());
+}
+
+#[test]
+fn empty_file_wrong_password_fails_without_finalized_output() {
+    let dir = tempdir().expect("tempdir must be created");
+    let input = dir.path().join("empty.bin");
+    let encrypted = dir.path().join("empty.bin.encdata");
+    let decrypted = dir.path().join("empty.bin.decoded");
+    fs::write(&input, []).expect("empty input file must be written");
+
+    let config = test_config(512);
+    encrypt_file(&input, &encrypted, "right-password", &config, false, |_| {})
+        .expect("encryption must succeed");
+
+    let err = decrypt_file(
+        &encrypted,
+        &decrypted,
+        "wrong-password",
+        &config,
+        false,
+        |_| {},
+    )
+    .expect_err("decryption must fail");
+
+    assert!(matches!(err, AppError::DecryptionFailed));
+    assert!(
+        !decrypted.exists(),
+        "decrypted output must not be finalized"
+    );
+}
+
+#[test]
+fn corrupted_empty_file_tag_fails() {
+    let dir = tempdir().expect("tempdir must be created");
+    let input = dir.path().join("empty.bin");
+    let encrypted = dir.path().join("empty.bin.encdata");
+    let decrypted = dir.path().join("empty.bin.decoded");
+    fs::write(&input, []).expect("empty input file must be written");
+
+    let config = test_config(512);
+    encrypt_file(&input, &encrypted, "empty-case", &config, false, |_| {})
+        .expect("encryption must succeed");
+
+    let mut bytes = fs::read(&encrypted).expect("encrypted file must be readable");
+    assert_eq!(bytes.len(), FILE_PREFIX_LEN + TAG_LEN);
+    bytes[FILE_PREFIX_LEN] ^= 0x5A;
+    fs::write(&encrypted, bytes).expect("corrupted file must be written");
+
+    let err = decrypt_file(&encrypted, &decrypted, "empty-case", &config, false, |_| {})
+        .expect_err("decryption must fail");
+
+    assert!(matches!(err, AppError::DecryptionFailed));
+    assert!(
+        !decrypted.exists(),
+        "decrypted output must not be finalized"
+    );
+}
+
+#[test]
+fn legacy_empty_file_without_tag_still_decrypts() {
+    let dir = tempdir().expect("tempdir must be created");
+    let encrypted = dir.path().join("legacy-empty.encdata");
+    let decrypted = dir.path().join("legacy-empty.out");
+
+    let mut legacy = Vec::new();
+    legacy.extend_from_slice(&[1u8; 16]);
+    legacy.extend_from_slice(&[2u8; 8]);
+    legacy.extend_from_slice(&0u64.to_le_bytes());
+    fs::write(&encrypted, legacy).expect("legacy encrypted file must be written");
+
+    let config = test_config(512);
+    decrypt_file(
+        &encrypted,
+        &decrypted,
+        "any-password",
+        &config,
+        false,
+        |_| {},
+    )
+    .expect("legacy empty file should remain supported");
 
     let decrypted_bytes = fs::read(&decrypted).expect("decrypted file must be readable");
     assert!(decrypted_bytes.is_empty());

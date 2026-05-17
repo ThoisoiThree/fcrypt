@@ -14,6 +14,7 @@ It is designed for large files and uses streaming I/O with bounded memory usage.
 - Password prompts are hidden
 - Output is written to a temp file and finalized only on full success
 - Decryption failures (wrong password, corruption, tampering, truncation) fail cleanly
+- Empty files encrypted by `fcrypt` 0.1.1 and later include an authentication tag
 
 ## File format
 
@@ -25,6 +26,8 @@ Encrypted files are compact opaque binary data with no readable text header.
 - encrypted chunks (AES-GCM, fixed plaintext chunk size except final chunk)
 
 This keeps the format compact while allowing strict structural validation and truncation detection.
+
+Compatibility note: `fcrypt` can decrypt legacy empty files produced before 0.1.1 that contain only the 32-byte prefix. Those legacy empty files do not contain an authentication tag, so the password and integrity of that specific legacy empty-file case cannot be verified.
 
 ## Build
 
@@ -88,6 +91,7 @@ Included tests cover:
 - small-file roundtrip
 - chunk-boundary roundtrips
 - empty-file roundtrip
+- empty-file authentication and legacy empty-file compatibility
 - wrong password failure
 - corrupted ciphertext failure
 - truncated ciphertext failure

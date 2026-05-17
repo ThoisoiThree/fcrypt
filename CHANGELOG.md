@@ -7,6 +7,16 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-05-17
+
+### Fixed
+- Authenticate newly encrypted empty files with an AES-GCM tag while preserving legacy empty-file compatibility.
+- Avoid non-forced output clobbering races by finalizing temp files with no-clobber persistence.
+- Replace forced outputs without deleting the destination before the final persist step.
+
+### Security
+- Updated `rand` to `0.8.6`.
+
 ## [0.1.0] - 2026-03-15
 
 ### Added

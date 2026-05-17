@@ -1,6 +1,6 @@
 [package]
 name = "filecrypt"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.74"
 description = "Cross-platform CLI for password-based file encryption and decryption"
@@ -19,7 +19,7 @@ aes-gcm = "0.10.3"
 argon2 = "0.5.3"
 clap = { version = "4.5.38", features = ["derive"] }
 indicatif = "0.17.11"
-rand = "0.8.5"
+rand = "0.8.6"
 rpassword = "7.5.1"
 tempfile = "3.13.0"
 thiserror = "1.0.64"

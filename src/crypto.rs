@@ -40,6 +40,10 @@ impl Default for CryptoConfig {
 pub fn expected_ciphertext_payload_len(plaintext_len: u64, chunk_size: usize) -> Result<u64> {
     validate_chunk_size(chunk_size)?;
 
+    if plaintext_len == 0 {
+        return Ok(TAG_LEN as u64);
+    }
+
     let chunk_size_u64 = u64::try_from(chunk_size).map_err(|_| AppError::InputTooLarge)?;
     let full_chunks = plaintext_len / chunk_size_u64;
     let last_plain_len = plaintext_len % chunk_size_u64;
@@ -87,6 +91,23 @@ where
 
     let key = derive_key(password, &salt, config)?;
     let cipher = Aes256Gcm::new_from_slice(key.as_ref()).map_err(|_| AppError::EncryptionFailed)?;
+
+    if plaintext_len == 0 {
+        let nonce_bytes = build_nonce(&nonce_prefix, 0)?;
+        let ciphertext = cipher
+            .encrypt(
+                Nonce::from_slice(&nonce_bytes),
+                Payload {
+                    msg: &[],
+                    aad: &length_bytes,
+                },
+            )
+            .map_err(|_| AppError::EncryptionFailed)?;
+
+        writer.write_all(&ciphertext)?;
+        writer.flush()?;
+        return Ok(());
+    }
 
     let mut buffer = vec![0u8; config.chunk_size];
     let mut chunk_index = 0u64;
@@ -166,8 +187,14 @@ where
     let plaintext_len = u64::from_le_bytes(length_bytes);
     let actual_payload_len = encrypted_len - FILE_PREFIX_LEN as u64;
     let expected_payload_len = expected_ciphertext_payload_len(plaintext_len, config.chunk_size)?;
-    if actual_payload_len != expected_payload_len {
+    let legacy_empty_without_tag = plaintext_len == 0 && actual_payload_len == 0;
+    if actual_payload_len != expected_payload_len && !legacy_empty_without_tag {
         return Err(AppError::DecryptionFailed);
+    }
+
+    if legacy_empty_without_tag {
+        writer.flush()?;
+        return Ok(());
     }
 
     let key = derive_key(password, &salt, config)?;
@@ -176,7 +203,11 @@ where
     let chunk_size_u64 = u64::try_from(config.chunk_size).map_err(|_| AppError::InputTooLarge)?;
     let full_chunks = plaintext_len / chunk_size_u64;
     let last_plain_len = plaintext_len % chunk_size_u64;
-    let total_chunks = full_chunks + u64::from(last_plain_len > 0);
+    let total_chunks = if plaintext_len == 0 {
+        1
+    } else {
+        full_chunks + u64::from(last_plain_len > 0)
+    };
     let full_chunk_cipher_len = config
         .chunk_size
         .checked_add(TAG_LEN)
@@ -184,7 +215,9 @@ where
     let mut ciphertext_buffer = vec![0u8; full_chunk_cipher_len];
 
     for chunk_index in 0..total_chunks {
-        let current_cipher_len = if chunk_index < full_chunks {
+        let current_cipher_len = if plaintext_len == 0 {
+            TAG_LEN
+        } else if chunk_index < full_chunks {
             full_chunk_cipher_len
         } else {
             usize::try_from(last_plain_len)
