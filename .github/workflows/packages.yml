@@ -61,7 +61,7 @@ jobs:
             -v "$PWD:/work" \
             -w /work \
             fedora:latest \
-            bash -lc 'dnf install -y rpm-build && bash packaging/scripts/build-linux-packages.sh dist/packages rpm'
+            bash -lc 'dnf install -y --setopt=install_weak_deps=False rpm-build && bash packaging/scripts/build-linux-packages.sh dist/packages rpm'
 
       - name: Validate GPG signing secrets
         env:
