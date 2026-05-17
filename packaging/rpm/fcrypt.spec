@@ -3,7 +3,7 @@
 
 Name:           fcrypt
 Version:        %{pkg_version}
-Release:        1%{?dist}
+Release:        1
 Summary:        Password-based file encryption and decryption CLI
 
 License:        MIT

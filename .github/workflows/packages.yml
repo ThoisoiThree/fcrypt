@@ -22,6 +22,7 @@ concurrency:
 
 env:
   PAGES_BASE_URL: https://thoisoithree.github.io/fcrypt
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   build-sign-publish:
@@ -33,7 +34,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ inputs.ref || github.ref }}
 
@@ -51,8 +52,16 @@ jobs:
       - name: Build release binary
         run: cargo build --release --locked
 
-      - name: Build DEB and RPM packages
-        run: bash packaging/scripts/build-linux-packages.sh dist/packages
+      - name: Build DEB package
+        run: bash packaging/scripts/build-linux-packages.sh dist/packages deb
+
+      - name: Build RPM package
+        run: |
+          docker run --rm \
+            -v "$PWD:/work" \
+            -w /work \
+            fedora:latest \
+            bash -lc 'dnf install -y rpm-build && bash packaging/scripts/build-linux-packages.sh dist/packages rpm'
 
       - name: Validate GPG signing secrets
         env:
@@ -87,14 +96,14 @@ jobs:
           %_gpg_path $HOME/.gnupg
           %__gpg /usr/bin/gpg
           %__gpg_check_password_cmd /bin/true
-          %__gpg_sign_cmd %{__gpg} gpg --batch --no-verbose --no-armor --pinentry-mode loopback --passphrase "$PACKAGING_GPG_PASSPHRASE" -u "%{_gpg_name}" -sbo %{__signature_filename} %{__plaintext_filename}
+          %__gpg_sign_cmd %{__gpg} --batch --no-verbose --no-armor --pinentry-mode loopback --passphrase "$PACKAGING_GPG_PASSPHRASE" -u "%{_gpg_name}" -sbo %{__signature_filename} %{__plaintext_filename}
           EOF
           rpmsign --addsign dist/packages/*.rpm
           rpm --checksig dist/packages/*.rpm
           (cd dist/packages && sha256sum *.deb *.rpm > SHA256SUMS)
 
       - name: Install Cosign
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@v4.1.0
 
       - name: Create detached GPG and Sigstore signatures
         env:
@@ -121,13 +130,13 @@ jobs:
             dist/packages/*
 
       - name: Configure Pages
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@v6
 
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v4
+        uses: actions/upload-pages-artifact@v5
         with:
           path: public
 
       - name: Deploy Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
