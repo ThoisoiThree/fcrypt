@@ -101,7 +101,8 @@ jobs:
           %__gpg_sign_cmd %{__gpg} --batch --no-verbose --no-armor --pinentry-mode loopback --passphrase "$PACKAGING_GPG_PASSPHRASE" -u "%{_gpg_name}" -sbo %{__signature_filename} %{__plaintext_filename}
           EOF
           rpmsign --addsign dist/packages/*.rpm
-          rpm --checksig dist/packages/*.rpm
+          rpm --import dist/packages/fcrypt-packaging.asc
+          rpm --checksig --verbose dist/packages/*.rpm
           (cd dist/packages && sha256sum *.deb *.rpm > SHA256SUMS)
 
       - name: Install Cosign
