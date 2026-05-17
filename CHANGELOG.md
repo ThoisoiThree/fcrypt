@@ -29,3 +29,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Progress bar reporting bytes processed.
 - Safe temp-file output workflow (finalize only after successful operation).
 - Integration tests for roundtrip, edge cases, corruption/truncation, and naming logic.
+
+[Unreleased]: https://github.com/ThoisoiThree/fcrypt/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/ThoisoiThree/fcrypt/compare/v0.1...v0.1.1
+[0.1.0]: https://github.com/ThoisoiThree/fcrypt/releases/tag/v0.1
