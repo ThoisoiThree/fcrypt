@@ -1,0 +1,171 @@
+name: npm
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  publish-platform:
+    name: Publish npm package (${{ matrix.package }})
+    runs-on: ${{ matrix.os }}
+    environment: npm-publish
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            package: linux-x64
+            target: x86_64-unknown-linux-gnu
+            bin: fcrypt
+          - os: ubuntu-24.04-arm
+            package: linux-arm64
+            target: aarch64-unknown-linux-gnu
+            bin: fcrypt
+          - os: macos-15-intel
+            package: darwin-x64
+            target: x86_64-apple-darwin
+            bin: fcrypt
+          - os: macos-latest
+            package: darwin-arm64
+            target: aarch64-apple-darwin
+            bin: fcrypt
+          - os: windows-latest
+            package: win32-x64
+            target: x86_64-pc-windows-msvc
+            bin: fcrypt.exe
+          - os: windows-11-arm
+            package: win32-arm64
+            target: aarch64-pc-windows-msvc
+            bin: fcrypt.exe
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Prepare npm package
+        shell: bash
+        env:
+          PACKAGE_DIR: npm/packages/${{ matrix.package }}
+          OUT_DIR: npm-artifacts/${{ matrix.package }}
+          PACKAGE_BIN: ${{ matrix.bin }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+
+          PACKAGE_VERSION="$(node -e "console.log(require('./' + process.env.PACKAGE_DIR + '/package.json').version)")"
+          VERSION="${GITHUB_REF_NAME#v}"
+
+          if [ "$VERSION" = "$GITHUB_REF_NAME" ]; then
+            VERSION="$PACKAGE_VERSION"
+          fi
+
+          if [ "$PACKAGE_VERSION" != "$VERSION" ]; then
+            echo "::error::${PACKAGE_DIR}/package.json version ${PACKAGE_VERSION} does not match tag ${VERSION}"
+            exit 1
+          fi
+
+          rm -rf "$OUT_DIR"
+          mkdir -p "$OUT_DIR/bin"
+
+          cp "$PACKAGE_DIR/package.json" "$OUT_DIR/package.json"
+          cp README.md LICENSE CHANGELOG.md "$OUT_DIR/"
+          cp "target/${TARGET}/release/${PACKAGE_BIN}" "$OUT_DIR/bin/${PACKAGE_BIN}"
+
+          if [ "$PACKAGE_BIN" = "fcrypt" ]; then
+            chmod 755 "$OUT_DIR/bin/fcrypt"
+          fi
+
+      - name: Publish npm package
+        shell: bash
+        env:
+          OUT_DIR: npm-artifacts/${{ matrix.package }}
+        run: |
+          set -euo pipefail
+
+          PACKAGE_NAME="$(node -e "console.log(require('./' + process.env.OUT_DIR + '/package.json').name)")"
+          PACKAGE_VERSION="$(node -e "console.log(require('./' + process.env.OUT_DIR + '/package.json').version)")"
+
+          if npm view "${PACKAGE_NAME}@${PACKAGE_VERSION}" version >/dev/null 2>&1; then
+            echo "${PACKAGE_NAME}@${PACKAGE_VERSION} is already published"
+            exit 0
+          fi
+
+          npm publish "$OUT_DIR" --access public
+
+  publish-main:
+    name: Publish npm package (@thoisoithree/fcrypt)
+    runs-on: ubuntu-latest
+    environment: npm-publish
+    needs: publish-platform
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Validate npm package version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PACKAGE_VERSION="$(node -e "console.log(require('./package.json').version)")"
+          VERSION="${GITHUB_REF_NAME#v}"
+
+          if [ "$VERSION" = "$GITHUB_REF_NAME" ]; then
+            VERSION="$PACKAGE_VERSION"
+          fi
+
+          if [ "$PACKAGE_VERSION" != "$VERSION" ]; then
+            echo "::error::package.json version ${PACKAGE_VERSION} does not match tag ${VERSION}"
+            exit 1
+          fi
+
+      - name: Publish npm package
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PACKAGE_NAME="$(node -e "console.log(require('./package.json').name)")"
+          PACKAGE_VERSION="$(node -e "console.log(require('./package.json').version)")"
+
+          chmod 755 npm/fcrypt/bin/fcrypt.js
+
+          if npm view "${PACKAGE_NAME}@${PACKAGE_VERSION}" version >/dev/null 2>&1; then
+            echo "${PACKAGE_NAME}@${PACKAGE_VERSION} is already published"
+            exit 0
+          fi
+
+          npm publish --access public

@@ -9,6 +9,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 - Added GitHub Actions automation for signed `.deb` and `.rpm` packages, APT/RPM repository publication through GitHub Pages, and Sigstore bundle generation for package artifacts.
+- Added npm package manifests, a Node.js launcher, and GitHub Actions automation for publishing prebuilt `fcrypt` binaries for Linux, macOS, and Windows on x64 and arm64.
 
 ## [0.1.2] - 2026-05-17
 

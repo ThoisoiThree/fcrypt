@@ -3,7 +3,7 @@
 ## 1. Prepare release
 
 1. Ensure `CHANGELOG.md` has a section for the new version.
-2. Bump `version` in `Cargo.toml`.
+2. Bump `version` in `Cargo.toml`, root `package.json`, and every `npm/packages/*/package.json`.
 3. Run checks:
    - `cargo fmt --check`
    - `cargo clippy --all-targets --all-features -- -D warnings`
@@ -45,3 +45,32 @@ Before enabling this workflow, configure GitHub Pages to use GitHub Actions and 
 - `PACKAGING_GPG_PASSPHRASE`
 
 Detailed setup and install commands are in `docs/PACKAGE_REPOSITORIES.md`.
+
+## 5. npm packages
+
+GitHub Actions `npm.yml` publishes:
+
+1. `@thoisoithree/fcrypt-linux-x64`
+2. `@thoisoithree/fcrypt-linux-arm64`
+3. `@thoisoithree/fcrypt-darwin-x64`
+4. `@thoisoithree/fcrypt-darwin-arm64`
+5. `@thoisoithree/fcrypt-win32-x64`
+6. `@thoisoithree/fcrypt-win32-arm64`
+7. `@thoisoithree/fcrypt`
+
+Publishing should use npm Trusted Publishing with GitHub Actions OIDC, not a long-lived npm token stored in repository secrets.
+
+Initial setup:
+
+1. Publish each package once manually, or from a private bootstrap workflow that only you control.
+2. On npmjs.com, open each package and configure Settings -> Trusted publishing:
+   - Provider: GitHub Actions
+   - Organization/user: `thoisoithree`
+   - Repository: `fcrypt`
+   - Workflow filename: `npm.yml`
+   - Environment name: `npm-publish`
+   - Allowed action: `npm publish`
+3. In GitHub repository settings, create environment `npm-publish` and require trusted reviewers for deployments.
+4. In package Settings -> Publishing access, enable two-factor authentication and disallow tokens.
+
+After that, pushing a `vX.Y.Z` tag runs `npm.yml`. The workflow publishes platform packages first, then the main launcher package. Re-running the workflow skips package versions that already exist in npm.

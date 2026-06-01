@@ -40,6 +40,24 @@ Binary output:
 - Linux/macOS: `target/release/fcrypt`
 - Windows: `target/release/fcrypt.exe`
 
+## Install from npm
+
+The npm package installs a small launcher and a prebuilt platform binary for the current OS/CPU.
+
+```bash
+npm install -g @thoisoithree/fcrypt
+fcrypt --help
+```
+
+Published platform packages:
+
+- `@thoisoithree/fcrypt-linux-x64`
+- `@thoisoithree/fcrypt-linux-arm64`
+- `@thoisoithree/fcrypt-darwin-x64`
+- `@thoisoithree/fcrypt-darwin-arm64`
+- `@thoisoithree/fcrypt-win32-x64`
+- `@thoisoithree/fcrypt-win32-arm64`
+
 ## Package repositories
 
 APT and RPM repositories are published from the `Package Repositories` GitHub Actions workflow when repository GPG signing secrets are configured.

@@ -1,0 +1,29 @@
+{
+  "name": "@thoisoithree/fcrypt-linux-arm64",
+  "version": "0.1.2",
+  "description": "Prebuilt fcrypt binary for Linux arm64",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thoisoithree/fcrypt.git"
+  },
+  "homepage": "https://github.com/thoisoithree/fcrypt#readme",
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "bin": {
+    "fcrypt": "bin/fcrypt"
+  },
+  "files": [
+    "bin/fcrypt",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

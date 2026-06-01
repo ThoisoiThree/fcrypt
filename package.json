@@ -1,0 +1,44 @@
+{
+  "name": "@thoisoithree/fcrypt",
+  "version": "0.1.2",
+  "description": "Cross-platform CLI for password-based file encryption and decryption",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thoisoithree/fcrypt.git"
+  },
+  "bugs": {
+    "url": "https://github.com/thoisoithree/fcrypt/issues"
+  },
+  "homepage": "https://github.com/thoisoithree/fcrypt#readme",
+  "keywords": [
+    "encryption",
+    "cli",
+    "aes-gcm",
+    "argon2",
+    "security"
+  ],
+  "bin": {
+    "fcrypt": "npm/fcrypt/bin/fcrypt.js"
+  },
+  "files": [
+    "npm/fcrypt/bin/fcrypt.js",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "engines": {
+    "node": ">=16"
+  },
+  "optionalDependencies": {
+    "@thoisoithree/fcrypt-darwin-arm64": "0.1.2",
+    "@thoisoithree/fcrypt-darwin-x64": "0.1.2",
+    "@thoisoithree/fcrypt-linux-arm64": "0.1.2",
+    "@thoisoithree/fcrypt-linux-x64": "0.1.2",
+    "@thoisoithree/fcrypt-win32-arm64": "0.1.2",
+    "@thoisoithree/fcrypt-win32-x64": "0.1.2"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

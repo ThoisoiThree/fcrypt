@@ -1,6 +1,10 @@
 # Rust build artifacts
 /target/
 
+# npm package build artifacts
+/npm-artifacts/
+/npm/packages/*/bin/
+
 # Rust/Cargo
 **/*.rs.bk
 
