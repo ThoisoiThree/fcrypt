@@ -117,7 +117,8 @@ jobs:
             exit 0
           fi
 
-          npm publish "$OUT_DIR" --access public
+          cd "$OUT_DIR"
+          npm publish --access public
 
   publish-main:
     name: Publish npm package (@thoisoithree/fcrypt)
