@@ -5,9 +5,9 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/thoisoithree/fcrypt.git"
+    "url": "git+https://github.com/ThoisoiThree/fcrypt.git"
   },
-  "homepage": "https://github.com/thoisoithree/fcrypt#readme",
+  "homepage": "https://github.com/ThoisoiThree/fcrypt#readme",
   "os": [
     "win32"
   ],

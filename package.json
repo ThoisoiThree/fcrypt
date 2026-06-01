@@ -5,12 +5,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/thoisoithree/fcrypt.git"
+    "url": "git+https://github.com/ThoisoiThree/fcrypt.git"
   },
   "bugs": {
-    "url": "https://github.com/thoisoithree/fcrypt/issues"
+    "url": "https://github.com/ThoisoiThree/fcrypt/issues"
   },
-  "homepage": "https://github.com/thoisoithree/fcrypt#readme",
+  "homepage": "https://github.com/ThoisoiThree/fcrypt#readme",
   "keywords": [
     "encryption",
     "cli",
