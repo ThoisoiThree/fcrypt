@@ -65,7 +65,7 @@ Initial setup:
 1. Publish each package once manually, or from a private bootstrap workflow that only you control.
 2. On npmjs.com, open each package and configure Settings -> Trusted publishing:
    - Provider: GitHub Actions
-   - Organization/user: `thoisoithree`
+   - Organization/user: `ThoisoiThree`
    - Repository: `fcrypt`
    - Workflow filename: `npm.yml`
    - Environment name: `npm-publish`
@@ -74,3 +74,13 @@ Initial setup:
 4. In package Settings -> Publishing access, enable two-factor authentication and disallow tokens.
 
 After that, pushing a `vX.Y.Z` tag runs `npm.yml`. The workflow publishes platform packages first, then the main launcher package. Re-running the workflow skips package versions that already exist in npm.
+
+If trusted publishing was configured with the wrong repository owner casing, recreate it:
+
+```bash
+npm trust list @thoisoithree/fcrypt-linux-x64
+npm trust revoke @thoisoithree/fcrypt-linux-x64 --id <trust-id>
+npm trust github @thoisoithree/fcrypt-linux-x64 --repo ThoisoiThree/fcrypt --file npm.yml --env npm-publish --allow-publish --yes
+```
+
+Repeat for each package.
