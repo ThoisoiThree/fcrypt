@@ -106,7 +106,7 @@ jobs:
           (cd dist/packages && sha256sum *.deb *.rpm > SHA256SUMS)
 
       - name: Install Cosign
-        uses: sigstore/cosign-installer@v4.1.0
+        uses: sigstore/cosign-installer@v4.1.2
 
       - name: Create detached GPG and Sigstore signatures
         env:
