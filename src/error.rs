@@ -18,6 +18,9 @@ pub enum AppError {
     #[error("Password cannot be empty.")]
     EmptyPassword,
 
+    #[error("Generated password length must be between 1 and {0} characters.")]
+    InvalidGeneratedPasswordLength(usize),
+
     #[error("Output file already exists: {0}")]
     OutputExists(PathBuf),
 

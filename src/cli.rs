@@ -5,7 +5,7 @@ use std::path::PathBuf;
 #[command(
     name = "fcrypt",
     version,
-    about = "Encrypt and decrypt files with password-based AES-256-GCM.",
+    about = "Encrypt and decrypt files with password-based encryption, and generate random passwords.",
     long_about = None
 )]
 pub struct Cli {
@@ -20,6 +20,9 @@ pub enum Command {
         /// Path to the input file to encrypt.
         #[arg(long, short = 'i', value_name = "FILE")]
         input: PathBuf,
+        /// Use high-resource Argon2id and AES-GCM-then-Serpent-EAX cascade encryption.
+        #[arg(long = "paranoic", alias = "paranoid", short = 'p')]
+        paranoic: bool,
         /// Overwrite the destination file without asking.
         #[arg(long, short = 'f')]
         force: bool,
@@ -32,5 +35,11 @@ pub enum Command {
         /// Overwrite the destination file without asking.
         #[arg(long, short = 'f')]
         force: bool,
+    },
+    /// Generate a random password.
+    Keygen {
+        /// Password length.
+        #[arg(value_name = "N")]
+        length: usize,
     },
 }

@@ -16,6 +16,10 @@ This project focuses on:
 - integrity guarantees and tamper detection
 - safe error handling without leaking sensitive data
 
+## Paranoic mode
+
+`fcrypt encrypt -p` / `--paranoic` uses higher Argon2id resource parameters by default: 1,048,576 KiB memory, time cost 6, and parallelism 4. It cascades each file chunk through AES-256-GCM and then Serpent-EAX. Paranoic files use a versioned binary metadata header with the paranoic flag, algorithms, chunk size, Argon2id parameters, plaintext length, salt, and nonce prefixes. That metadata is authenticated as AEAD associated data.
+
 ## Legacy compatibility
 
 `fcrypt` 0.1.1 and later authenticate newly encrypted empty files with an AES-GCM tag.

@@ -8,17 +8,19 @@ It is designed for large files and uses streaming I/O with bounded memory usage.
 ## Security
 
 - AES-256-GCM authenticated encryption
+- Optional paranoic mode with higher Argon2id cost and AES-GCM-then-Serpent-EAX cascade encryption
 - Argon2id password-based key derivation with random 16-byte salt
 - Random per-file nonce prefix
 - No plaintext password storage or logging
 - Password prompts are hidden
+- Random password generation with the operating system CSPRNG
 - Output is written to a temp file and finalized only on full success
 - Decryption failures (wrong password, corruption, tampering, truncation) fail cleanly
 - Empty files encrypted by `fcrypt` 0.1.1 and later include an authentication tag
 
 ## File format
 
-Encrypted files are compact opaque binary data with no readable text header.
+Encrypted files are compact binary data. Standard encryption keeps the original opaque binary format:
 
 - 16 bytes: random salt
 - 8 bytes: random nonce prefix
@@ -26,6 +28,8 @@ Encrypted files are compact opaque binary data with no readable text header.
 - encrypted chunks (AES-GCM, fixed plaintext chunk size except final chunk)
 
 This keeps the format compact while allowing strict structural validation and truncation detection.
+
+Paranoic encryption uses a versioned binary metadata header with a short magic/version prefix. The header records the paranoic flag, algorithm, chunk size, Argon2id parameters, plaintext length, salt, and separate nonce prefixes for the AES-GCM and Serpent-EAX layers. The header is authenticated as AEAD AAD by both layers.
 
 Compatibility note: `fcrypt` can decrypt legacy empty files produced before 0.1.1 that contain only the 32-byte prefix. Those legacy empty files do not contain an authentication tag, so the password and integrity of that specific legacy empty-file case cannot be verified.
 
@@ -88,26 +92,44 @@ Details: see `docs/PACKAGE_REPOSITORIES.md`.
 Show help:
 
 ```bash
-cargo run --bin fcrypt -- --help
+fcrypt --help
 ```
 
 Encrypt:
 
 ```bash
-cargo run --bin fcrypt -- encrypt --input /path/to/report.pdf
+fcrypt encrypt --input /path/to/report.pdf
 ```
+
+Encrypt with paranoic mode:
+
+```bash
+fcrypt encrypt --paranoic --input /path/to/report.pdf
+```
+
+`--paranoid` is accepted as an alias, and `-p` is the short form.
+
+Default paranoic Argon2id parameters are 1,048,576 KiB memory, time cost 6, and parallelism 4.
 
 Decrypt:
 
 ```bash
-cargo run --bin fcrypt -- decrypt --input /path/to/report.pdf.enc
+fcrypt decrypt --input /path/to/report.pdf.enc
 ```
 
 Force overwrite (skip confirmation):
 
 ```bash
-cargo run --bin fcrypt -- decrypt --input /path/to/report.pdf.enc --force
+fcrypt decrypt --input /path/to/report.pdf.enc --force
 ```
+
+Generate a random password:
+
+```bash
+fcrypt keygen 32
+```
+
+`keygen` writes only the generated password to stdout followed by a newline. The password length must be between 1 and 4096 characters. The alphabet contains `A-Z`, `a-z`, `0-9`, and portable ASCII special characters: `!#$%&()*+,-./:;<=>?@[]^_{|}~`.
 
 ## Output naming rules
 

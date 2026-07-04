@@ -3,7 +3,7 @@ use std::io::{BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
 
-use crate::crypto::{self, CryptoConfig};
+use crate::crypto::{self, CryptoConfig, CryptoMode};
 use crate::error::{AppError, Result};
 
 pub fn encrypt_file<F>(
@@ -12,7 +12,30 @@ pub fn encrypt_file<F>(
     password: &str,
     config: &CryptoConfig,
     allow_overwrite: bool,
-    mut on_progress: F,
+    on_progress: F,
+) -> Result<()>
+where
+    F: FnMut(u64),
+{
+    encrypt_file_with_mode(
+        input_path,
+        output_path,
+        password,
+        config,
+        CryptoMode::Standard,
+        allow_overwrite,
+        on_progress,
+    )
+}
+
+pub fn encrypt_file_with_mode<F>(
+    input_path: &Path,
+    output_path: &Path,
+    password: &str,
+    config: &CryptoConfig,
+    mode: CryptoMode,
+    allow_overwrite: bool,
+    on_progress: F,
 ) -> Result<()>
 where
     F: FnMut(u64),
@@ -35,9 +58,15 @@ where
             .ok_or(AppError::InputTooLarge)?
             .max(64 * 1024);
         let mut writer = BufWriter::with_capacity(writer_capacity, temp_output.as_file_mut());
-        crypto::encrypt_stream(&mut reader, &mut writer, input_len, password, config, |n| {
-            on_progress(n)
-        })?;
+        crypto::encrypt_stream_with_mode(
+            &mut reader,
+            &mut writer,
+            input_len,
+            password,
+            config,
+            mode,
+            on_progress,
+        )?;
         writer.flush()?;
     }
 

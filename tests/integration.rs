@@ -2,9 +2,11 @@ use std::cell::Cell;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use filecrypt::crypto::{CryptoConfig, FILE_PREFIX_LEN, TAG_LEN};
+use filecrypt::crypto::{
+    CryptoConfig, CryptoMode, FILE_PREFIX_LEN, PARANOID_FLAG, TAG_LEN, VERSIONED_HEADER_LEN,
+};
 use filecrypt::error::AppError;
-use filecrypt::file_ops::{decrypt_file, encrypt_file};
+use filecrypt::file_ops::{decrypt_file, encrypt_file, encrypt_file_with_mode};
 use filecrypt::overwrite::resolve_overwrite;
 use filecrypt::pathing::{decryption_output_path, encryption_output_path};
 use tempfile::tempdir;
@@ -15,6 +17,9 @@ fn test_config(chunk_size: usize) -> CryptoConfig {
         argon_memory_kib: 8,
         argon_time_cost: 1,
         argon_parallelism: 1,
+        paranoid_argon_memory_kib: 8,
+        paranoid_argon_time_cost: 1,
+        paranoid_argon_parallelism: 1,
     }
 }
 
@@ -258,6 +263,239 @@ fn empty_file_roundtrip() {
 
     let decrypted_bytes = fs::read(&decrypted).expect("decrypted file must be readable");
     assert!(decrypted_bytes.is_empty());
+}
+
+#[test]
+fn standard_encryption_keeps_legacy_prefix_format() {
+    let dir = tempdir().expect("tempdir must be created");
+    let input = dir.path().join("legacy-format.bin");
+    let encrypted = dir.path().join("legacy-format.bin.encdata");
+    let original = deterministic_bytes(96);
+    fs::write(&input, &original).expect("input file must be written");
+
+    let config = test_config(64);
+    encrypt_file(
+        &input,
+        &encrypted,
+        "standard-format",
+        &config,
+        false,
+        |_| {},
+    )
+    .expect("encryption must succeed");
+
+    let encrypted_len = fs::metadata(&encrypted)
+        .expect("metadata must be readable")
+        .len();
+    assert_eq!(
+        encrypted_len,
+        FILE_PREFIX_LEN as u64
+            + filecrypt::crypto::expected_ciphertext_payload_len(
+                original.len() as u64,
+                config.chunk_size,
+            )
+            .expect("expected length must be calculated")
+    );
+}
+
+#[test]
+fn paranoid_roundtrip_small_file() {
+    let dir = tempdir().expect("tempdir must be created");
+    let input = dir.path().join("paranoid.bin");
+    let encrypted = dir.path().join("paranoid.bin.encdata");
+    let decrypted = dir.path().join("paranoid.bin.decoded");
+    let original = deterministic_bytes(150);
+    fs::write(&input, &original).expect("input file must be written");
+
+    let config = test_config(64);
+    encrypt_file_with_mode(
+        &input,
+        &encrypted,
+        "paranoid-password",
+        &config,
+        CryptoMode::Paranoid,
+        false,
+        |_| {},
+    )
+    .expect("paranoid encryption must succeed");
+    decrypt_file(
+        &encrypted,
+        &decrypted,
+        "paranoid-password",
+        &config,
+        false,
+        |_| {},
+    )
+    .expect("paranoid decryption must succeed");
+
+    let decrypted_bytes = fs::read(&decrypted).expect("decrypted file must be readable");
+    assert_eq!(decrypted_bytes, original);
+}
+
+#[test]
+fn paranoid_header_records_mode_and_argon_params() {
+    let dir = tempdir().expect("tempdir must be created");
+    let input = dir.path().join("paranoid-meta.bin");
+    let encrypted = dir.path().join("paranoid-meta.bin.encdata");
+    fs::write(&input, deterministic_bytes(20)).expect("input file must be written");
+
+    let config = test_config(64);
+    encrypt_file_with_mode(
+        &input,
+        &encrypted,
+        "metadata-password",
+        &config,
+        CryptoMode::Paranoid,
+        false,
+        |_| {},
+    )
+    .expect("paranoid encryption must succeed");
+
+    let bytes = fs::read(&encrypted).expect("encrypted file must be readable");
+    assert!(bytes.len() >= VERSIONED_HEADER_LEN);
+    assert_eq!(&bytes[..8], b"FCRYPTH1");
+    assert_eq!(bytes[8], 1);
+    assert_eq!(bytes[9] & PARANOID_FLAG, PARANOID_FLAG);
+    assert_eq!(u64::from_le_bytes(bytes[12..20].try_into().unwrap()), 64);
+    assert_eq!(u32::from_le_bytes(bytes[20..24].try_into().unwrap()), 8);
+    assert_eq!(u32::from_le_bytes(bytes[24..28].try_into().unwrap()), 1);
+    assert_eq!(u32::from_le_bytes(bytes[28..32].try_into().unwrap()), 1);
+    assert_eq!(u64::from_le_bytes(bytes[32..40].try_into().unwrap()), 20);
+}
+
+#[test]
+fn paranoid_wrong_password_fails_without_finalized_output() {
+    let dir = tempdir().expect("tempdir must be created");
+    let input = dir.path().join("paranoid-wrong.bin");
+    let encrypted = dir.path().join("paranoid-wrong.bin.encdata");
+    let decrypted = dir.path().join("paranoid-wrong.bin.decoded");
+    fs::write(&input, deterministic_bytes(140)).expect("input file must be written");
+
+    let config = test_config(64);
+    encrypt_file_with_mode(
+        &input,
+        &encrypted,
+        "right-password",
+        &config,
+        CryptoMode::Paranoid,
+        false,
+        |_| {},
+    )
+    .expect("paranoid encryption must succeed");
+
+    let err = decrypt_file(
+        &encrypted,
+        &decrypted,
+        "wrong-password",
+        &config,
+        false,
+        |_| {},
+    )
+    .expect_err("paranoid decryption must fail");
+    assert!(matches!(err, AppError::DecryptionFailed));
+    assert!(
+        !decrypted.exists(),
+        "decrypted output must not be finalized"
+    );
+}
+
+#[test]
+fn corrupted_paranoid_ciphertext_fails() {
+    let dir = tempdir().expect("tempdir must be created");
+    let input = dir.path().join("paranoid-corrupt.bin");
+    let encrypted = dir.path().join("paranoid-corrupt.bin.encdata");
+    let decrypted = dir.path().join("paranoid-corrupt.bin.decoded");
+    fs::write(&input, deterministic_bytes(140)).expect("input file must be written");
+
+    let config = test_config(64);
+    encrypt_file_with_mode(
+        &input,
+        &encrypted,
+        "password",
+        &config,
+        CryptoMode::Paranoid,
+        false,
+        |_| {},
+    )
+    .expect("paranoid encryption must succeed");
+
+    let mut bytes = fs::read(&encrypted).expect("encrypted file must be readable");
+    bytes[VERSIONED_HEADER_LEN] ^= 0x5A;
+    fs::write(&encrypted, bytes).expect("corrupted file must be written");
+
+    let err = decrypt_file(&encrypted, &decrypted, "password", &config, false, |_| {})
+        .expect_err("paranoid decryption must fail");
+    assert!(matches!(err, AppError::DecryptionFailed));
+    assert!(
+        !decrypted.exists(),
+        "decrypted output must not be finalized"
+    );
+}
+
+#[test]
+fn truncated_paranoid_ciphertext_fails() {
+    let dir = tempdir().expect("tempdir must be created");
+    let input = dir.path().join("paranoid-truncated.bin");
+    let encrypted = dir.path().join("paranoid-truncated.bin.encdata");
+    let decrypted = dir.path().join("paranoid-truncated.bin.decoded");
+    fs::write(&input, deterministic_bytes(140)).expect("input file must be written");
+
+    let config = test_config(64);
+    encrypt_file_with_mode(
+        &input,
+        &encrypted,
+        "password",
+        &config,
+        CryptoMode::Paranoid,
+        false,
+        |_| {},
+    )
+    .expect("paranoid encryption must succeed");
+
+    let mut bytes = fs::read(&encrypted).expect("encrypted file must be readable");
+    bytes.truncate(bytes.len() - 1);
+    fs::write(&encrypted, bytes).expect("truncated file must be written");
+
+    let err = decrypt_file(&encrypted, &decrypted, "password", &config, false, |_| {})
+        .expect_err("paranoid decryption must fail");
+    assert!(matches!(err, AppError::DecryptionFailed));
+    assert!(
+        !decrypted.exists(),
+        "decrypted output must not be finalized"
+    );
+}
+
+#[test]
+fn tampered_paranoid_metadata_fails() {
+    let dir = tempdir().expect("tempdir must be created");
+    let input = dir.path().join("paranoid-metadata.bin");
+    let encrypted = dir.path().join("paranoid-metadata.bin.encdata");
+    let decrypted = dir.path().join("paranoid-metadata.bin.decoded");
+    fs::write(&input, deterministic_bytes(140)).expect("input file must be written");
+
+    let config = test_config(64);
+    encrypt_file_with_mode(
+        &input,
+        &encrypted,
+        "password",
+        &config,
+        CryptoMode::Paranoid,
+        false,
+        |_| {},
+    )
+    .expect("paranoid encryption must succeed");
+
+    let mut bytes = fs::read(&encrypted).expect("encrypted file must be readable");
+    bytes[32] ^= 0x01;
+    fs::write(&encrypted, bytes).expect("tampered file must be written");
+
+    let err = decrypt_file(&encrypted, &decrypted, "password", &config, false, |_| {})
+        .expect_err("paranoid decryption must fail");
+    assert!(matches!(err, AppError::DecryptionFailed));
+    assert!(
+        !decrypted.exists(),
+        "decrypted output must not be finalized"
+    );
 }
 
 #[test]
