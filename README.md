@@ -33,7 +33,7 @@ password -> Argon2id -> AES-256-GCM key -> encrypted file
 
 The password is entered through a hidden terminal prompt. The password is not stored in the encrypted file and is not logged.
 
-### Asymmetric `.fe` mode
+### Asymmetric mode
 
 Asymmetric mode is recipient-key based:
 
