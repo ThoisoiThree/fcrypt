@@ -23,9 +23,12 @@ After pushing a `v*` tag, GitHub Actions `release.yml` will:
 
 1. Build release binaries on:
    - Linux (`x86_64-unknown-linux-gnu`)
-   - macOS (`x86_64-apple-darwin`)
-   - Windows (`x86_64-pc-windows-msvc`)
-2. Package binaries and generate SHA-256 checksum files.
+   - Linux ARM64 (`aarch64-unknown-linux-gnu`)
+   - macOS Intel (`x86_64-apple-darwin`)
+   - macOS Apple Silicon (`aarch64-apple-darwin`)
+   - Windows x64 (`x86_64-pc-windows-msvc`)
+   - Windows ARM64 (`aarch64-pc-windows-msvc`)
+2. Attach raw binary files and SHA-256 checksum files.
 3. Publish a GitHub Release with attached artifacts.
 
 ## 4. Package repositories

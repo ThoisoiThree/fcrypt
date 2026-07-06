@@ -1,6 +1,6 @@
 {
   "name": "@thoisoithree/fcrypt",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Cross-platform CLI for password-based file encryption and decryption",
   "license": "MIT",
   "repository": {
@@ -31,12 +31,12 @@
     "node": ">=16"
   },
   "optionalDependencies": {
-    "@thoisoithree/fcrypt-darwin-arm64": "0.1.2",
-    "@thoisoithree/fcrypt-darwin-x64": "0.1.2",
-    "@thoisoithree/fcrypt-linux-arm64": "0.1.2",
-    "@thoisoithree/fcrypt-linux-x64": "0.1.2",
-    "@thoisoithree/fcrypt-win32-arm64": "0.1.2",
-    "@thoisoithree/fcrypt-win32-x64": "0.1.2"
+    "@thoisoithree/fcrypt-darwin-arm64": "0.2.0",
+    "@thoisoithree/fcrypt-darwin-x64": "0.2.0",
+    "@thoisoithree/fcrypt-linux-arm64": "0.2.0",
+    "@thoisoithree/fcrypt-linux-x64": "0.2.0",
+    "@thoisoithree/fcrypt-win32-arm64": "0.2.0",
+    "@thoisoithree/fcrypt-win32-x64": "0.2.0"
   },
   "publishConfig": {
     "access": "public"

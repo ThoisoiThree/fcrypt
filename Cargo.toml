@@ -1,6 +1,6 @@
 [package]
 name = "filecrypt"
-version = "0.1.5"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.74"
 description = "Cross-platform CLI for password-based file encryption and decryption"
@@ -9,6 +9,10 @@ readme = "README.md"
 keywords = ["encryption", "cli", "aes-gcm", "argon2", "security"]
 categories = ["command-line-utilities", "cryptography"]
 autobins = false
+
+[features]
+default = ["pqc"]
+pqc = ["dep:oqs"]
 
 [[bin]]
 name = "fcrypt"
@@ -20,9 +24,22 @@ argon2 = "0.5.3"
 clap = { version = "4.5.38", features = ["derive"] }
 eax = "0.5.0"
 indicatif = "0.18.4"
+base64 = "0.22"
+ciborium = "0.2"
+hex = "0.4"
+hkdf = "0.12"
+oqs = { version = "0.11", optional = true, default-features = false, features = ["std", "kems", "sigs", "vendored"] }
 rand = "0.8.6"
 rpassword = "7.5.1"
+serde = { version = "1", features = ["derive"] }
+serde_bytes = "0.11"
+serde_json = "1"
 serpent = "0.5.1"
+sha3 = "0.10"
 tempfile = "3.13.0"
 thiserror = "1.0.64"
 zeroize = "1.8.1"
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"

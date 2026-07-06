@@ -13,24 +13,42 @@ env:
 
 jobs:
   build:
-    name: Build and Package (${{ matrix.platform }})
+    name: Build Binary (${{ matrix.platform }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
-            platform: linux-x86_64
+            platform: linux-x64
+            target: x86_64-unknown-linux-gnu
             bin: fcrypt
-            archive: tar.gz
+            artifact: fcrypt-linux-x64
+          - os: ubuntu-24.04-arm
+            platform: linux-arm64
+            target: aarch64-unknown-linux-gnu
+            bin: fcrypt
+            artifact: fcrypt-linux-arm64
+          - os: macos-15-intel
+            platform: darwin-x64
+            target: x86_64-apple-darwin
+            bin: fcrypt
+            artifact: fcrypt-darwin-x64
           - os: macos-latest
-            platform: macos-x86_64
+            platform: darwin-arm64
+            target: aarch64-apple-darwin
             bin: fcrypt
-            archive: tar.gz
+            artifact: fcrypt-darwin-arm64
           - os: windows-latest
-            platform: windows-x86_64
+            platform: win32-x64
+            target: x86_64-pc-windows-msvc
             bin: fcrypt.exe
-            archive: zip
+            artifact: fcrypt-win32-x64.exe
+          - os: windows-11-arm
+            platform: win32-arm64
+            target: aarch64-pc-windows-msvc
+            bin: fcrypt.exe
+            artifact: fcrypt-win32-arm64.exe
 
     steps:
       - name: Checkout
@@ -38,40 +56,39 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
 
       - name: Build release binary
-        run: cargo build --release --locked
+        run: cargo build --release --locked --target ${{ matrix.target }}
 
-      - name: Package tarball (Unix)
+      - name: Prepare binary artifact (Unix)
         if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p dist package
-          ARCHIVE="fcrypt-${{ matrix.platform }}.${{ matrix.archive }}"
-          cp "target/release/${{ matrix.bin }}" package/
-          cp README.md LICENSE CHANGELOG.md package/
-          tar -czf "dist/${ARCHIVE}" -C package .
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" "dist/${{ matrix.artifact }}"
+          chmod 755 "dist/${{ matrix.artifact }}"
           if command -v sha256sum >/dev/null 2>&1; then
-            sha256sum "dist/${ARCHIVE}" > "dist/${ARCHIVE}.sha256"
+            sha256sum "dist/${{ matrix.artifact }}" > "dist/${{ matrix.artifact }}.sha256"
           else
-            shasum -a 256 "dist/${ARCHIVE}" | awk '{print tolower($1)"  '"${ARCHIVE}"'"}' > "dist/${ARCHIVE}.sha256"
+            shasum -a 256 "dist/${{ matrix.artifact }}" | awk '{print tolower($1)"  ${{ matrix.artifact }}"}' > "dist/${{ matrix.artifact }}.sha256"
           fi
 
-      - name: Package zip (Windows)
+      - name: Prepare binary artifact (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path dist -Force | Out-Null
-          $archive = "fcrypt-${{ matrix.platform }}.${{ matrix.archive }}"
-          Compress-Archive -Path @("target/release/${{ matrix.bin }}", "README.md", "LICENSE", "CHANGELOG.md") -DestinationPath "dist/$archive" -Force
-          $hash = (Get-FileHash -Algorithm SHA256 "dist/$archive").Hash.ToLower()
-          "$hash  $archive" | Out-File -Encoding ascii "dist/$archive.sha256"
+          Copy-Item "target/${{ matrix.target }}/release/${{ matrix.bin }}" "dist/${{ matrix.artifact }}"
+          $hash = (Get-FileHash -Algorithm SHA256 "dist/${{ matrix.artifact }}").Hash.ToLower()
+          "$hash  ${{ matrix.artifact }}" | Out-File -Encoding ascii "dist/${{ matrix.artifact }}.sha256"
 
-      - name: Upload packaged artifacts
+      - name: Upload binary artifacts
         uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.platform }}

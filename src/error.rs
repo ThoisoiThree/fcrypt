@@ -21,6 +21,9 @@ pub enum AppError {
     #[error("Generated password length must be between 1 and {0} characters.")]
     InvalidGeneratedPasswordLength(usize),
 
+    #[error("Generated phrase word count must be between 1 and {0} words.")]
+    InvalidGeneratedPhraseWordCount(usize),
+
     #[error("Output file already exists: {0}")]
     OutputExists(PathBuf),
 
@@ -32,6 +35,9 @@ pub enum AppError {
 
     #[error("Invalid encryption configuration: {0}")]
     CryptoConfig(String),
+
+    #[error("Invalid argument: {0}")]
+    InvalidArgument(String),
 
     #[error("Chunk size must be greater than zero.")]
     InvalidChunkSize,
@@ -50,4 +56,52 @@ pub enum AppError {
 
     #[error("Decryption failed: wrong password or file is corrupted.")]
     DecryptionFailed,
+
+    #[error(
+        "This file uses asymmetric .fe format.\nUse: fcrypt asym decrypt {0} -i <recipient_default.sec>"
+    )]
+    SymmetricCommandUsedForFe(String),
+
+    #[error(
+        "This file does not look like an asymmetric .fe file.\nUse the symmetric command if this is a password-encrypted file:\n  fcrypt decrypt {0}"
+    )]
+    NotAsymmetricFile(String),
+
+    #[error("Asymmetric PQC mode was not enabled in this build.\nRebuild with feature: pqc")]
+    AsymmetricUnavailable,
+
+    #[error("unsupported .fe version: {0}")]
+    UnsupportedFeVersion(u16),
+
+    #[error("invalid asymmetric file: {0}")]
+    InvalidAsymmetricFile(String),
+
+    #[error("invalid asymmetric key file: {0}")]
+    InvalidAsymmetricKeyFile(String),
+
+    #[error(
+        "No matching recipient secret key found.\nUse: fcrypt asym decrypt <file.fe> -i <recipient_default.sec>"
+    )]
+    NoMatchingIdentity,
+
+    #[error("Multiple matching recipient secret keys found. Use -i <recipient_default.sec>.")]
+    MultipleMatchingIdentities,
+
+    #[error("decryption failed: authentication failed or wrong key")]
+    AsymmetricAuthenticationFailed,
+
+    #[error("signature required but not found")]
+    SignatureRequired,
+
+    #[error("signature required but no verification key was provided")]
+    SignatureVerificationKeyRequired,
+
+    #[error("signature verification failed")]
+    SignatureVerificationFailed,
+
+    #[error("PQC operation failed: {0}")]
+    Pqc(String),
+
+    #[error("serialization failed: {0}")]
+    Serialization(String),
 }

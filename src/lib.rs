@@ -1,9 +1,7 @@
+pub mod asym;
 pub mod cli;
-pub mod crypto;
 pub mod error;
-pub mod file_ops;
 pub mod keygen;
-pub mod overwrite;
-pub mod pathing;
-pub mod progress;
-pub mod prompt;
+pub mod sym;
+
+pub use sym::{crypto, file_ops, overwrite, pathing, progress, prompt};

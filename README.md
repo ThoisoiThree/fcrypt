@@ -1,57 +1,77 @@
 # fcrypt
 
-`fcrypt` is a cross-platform Rust CLI for password-based file encryption and decryption.
-The crate name is `filecrypt`, and the installed binary is `fcrypt`.
+`fcrypt` is a cross-platform Rust CLI for local file encryption, decryption, key generation, and post-quantum asymmetric file envelopes.
 
-It is designed for large files and uses streaming I/O with bounded memory usage.
+The crate name is `filecrypt`; the installed binary is `fcrypt`.
 
-## Security
+`fcrypt` is designed for large files. It processes data as authenticated chunks, writes outputs through temporary files, and finalizes results only after the operation succeeds.
 
-- AES-256-GCM authenticated encryption
-- Optional paranoic mode with higher Argon2id cost and AES-GCM-then-Serpent-EAX cascade encryption
-- Argon2id password-based key derivation with random 16-byte salt
-- Random per-file nonce prefix
-- No plaintext password storage or logging
-- Password prompts are hidden
-- Random password generation with the operating system CSPRNG
-- Output is written to a temp file and finalized only on full success
-- Decryption failures (wrong password, corruption, tampering, truncation) fail cleanly
-- Empty files encrypted by `fcrypt` 0.1.1 and later include an authentication tag
+## Highlights
 
-## File format
+- Password-based symmetric file encryption with AES-256-GCM and Argon2id.
+- Optional high-cost symmetric `--paranoic` mode with AES-GCM-then-Serpent-EAX cascade encryption.
+- Asymmetric post-quantum `.fe` envelopes using ML-KEM-1024 + HQC-256 to protect the file secret.
+- AES-256-GCM streaming encryption for file contents.
+- Optional ML-DSA-87 signatures for `.fe` files.
+- Automatic recipient key generation when no recipient public key is provided.
+- Hidden password prompts for symmetric encryption and decryption.
+- Random password generation and Diceware-style passphrase generation from the embedded EFF large wordlist.
+- Atomic output workflow: plaintext/ciphertext/key files are written to temp files first.
+- npm packages with prebuilt binaries for Linux, macOS, and Windows on x64 and arm64.
 
-Encrypted files are compact binary data. Standard encryption keeps the original opaque binary format:
+## Security model
 
-- 16 bytes: random salt
-- 8 bytes: random nonce prefix
-- 8 bytes: plaintext length (binary, authenticated as AEAD AAD)
-- encrypted chunks (AES-GCM, fixed plaintext chunk size except final chunk)
+`fcrypt` has two separate encryption modes.
 
-This keeps the format compact while allowing strict structural validation and truncation detection.
+### Symmetric mode
 
-Paranoic encryption uses a versioned binary metadata header with a short magic/version prefix. The header records the paranoic flag, algorithm, chunk size, Argon2id parameters, plaintext length, salt, and separate nonce prefixes for the AES-GCM and Serpent-EAX layers. The header is authenticated as AEAD AAD by both layers.
+Symmetric mode is password-based:
 
-Compatibility note: `fcrypt` can decrypt legacy empty files produced before 0.1.1 that contain only the 32-byte prefix. Those legacy empty files do not contain an authentication tag, so the password and integrity of that specific legacy empty-file case cannot be verified.
-
-## Build
-
-```bash
-cargo build --release
+```text
+password -> Argon2id -> AES-256-GCM key -> encrypted file
 ```
 
-Binary output:
+The password is entered through a hidden terminal prompt. The password is not stored in the encrypted file and is not logged.
 
-- Linux/macOS: `target/release/fcrypt`
-- Windows: `target/release/fcrypt.exe`
+### Asymmetric `.fe` mode
 
-## Install from npm
+Asymmetric mode is recipient-key based:
 
-The npm package installs a small launcher and a prebuilt platform binary for the current OS/CPU.
+```text
+ML-KEM-1024 shared secret ┐
+                          ├─ HKDF-SHA3-512 ── wrap key ── encrypt file_secret
+HQC-256 shared secret ────┘
+
+file_secret ── HKDF-SHA3-512 ── AES-256-GCM file key ── encrypted chunks
+```
+
+The file itself is encrypted with AES-256-GCM. ML-KEM-1024 and HQC-256 are used to protect the random file secret. This gives the `.fe` format two independent post-quantum KEM layers by default.
+
+Optional signatures use ML-DSA-87:
+
+```text
+ciphertext + canonical envelope metadata -> ML-DSA-87 signature
+```
+
+A recipient key and a signing key are different keys:
+
+- `*_recipient_default.pub` is shared with people who should be able to encrypt files for the recipient.
+- `*_recipient_default.sec` decrypts matching `.fe` files and must remain secret.
+- `*_signer_mldsa87.pub` is shared with people who should verify signatures.
+- `*_signer_mldsa87.sec` creates signatures and must remain secret.
+
+Never share `.sec` files.
+
+## Install
+
+### npm
 
 ```bash
 npm install -g @thoisoithree/fcrypt
 fcrypt --help
 ```
+
+The npm package installs a small launcher and a prebuilt platform binary for the current OS/CPU.
 
 Published platform packages:
 
@@ -62,112 +82,517 @@ Published platform packages:
 - `@thoisoithree/fcrypt-win32-x64`
 - `@thoisoithree/fcrypt-win32-arm64`
 
-## Package repositories
+### GitHub release binaries
 
-APT and RPM repositories are published from the `Package Repositories` GitHub Actions workflow when repository GPG signing secrets are configured.
+GitHub Releases provide raw binary files and `.sha256` checksum files for:
 
-Ubuntu/Debian:
+- Linux x64: `fcrypt-linux-x64`
+- Linux arm64: `fcrypt-linux-arm64`
+- macOS Intel: `fcrypt-darwin-x64`
+- macOS Apple Silicon: `fcrypt-darwin-arm64`
+- Windows x64: `fcrypt-win32-x64.exe`
+- Windows arm64: `fcrypt-win32-arm64.exe`
 
-```bash
-curl -fsSL https://thoisoithree.github.io/fcrypt/apt/fcrypt-packaging.asc \
-  | sudo gpg --dearmor -o /usr/share/keyrings/fcrypt-archive-keyring.gpg
-echo "deb [arch=amd64 signed-by=/usr/share/keyrings/fcrypt-archive-keyring.gpg] https://thoisoithree.github.io/fcrypt/apt stable main" \
-  | sudo tee /etc/apt/sources.list.d/fcrypt.list
-sudo apt update
-sudo apt install fcrypt
-```
-
-Fedora/RHEL-compatible:
+### Build from source
 
 ```bash
-sudo curl -fsSL -o /etc/yum.repos.d/fcrypt.repo \
-  https://thoisoithree.github.io/fcrypt/rpm/fcrypt.repo
-sudo dnf install fcrypt
+cargo build --release --locked
 ```
 
-Details: see `docs/PACKAGE_REPOSITORIES.md`.
+Asymmetric PQC mode is enabled by default through the `pqc` feature and uses Open Quantum Safe `liboqs` through Rust `oqs` bindings. Building with PQC support can require:
 
-## Usage
+- Rust stable
+- C compiler
+- CMake
+- platform build tools
 
-Show help:
+To build only the symmetric password-based mode:
 
 ```bash
-fcrypt --help
+cargo build --release --locked --no-default-features
 ```
 
-Encrypt:
+When built without the `pqc` feature, `fcrypt asym ...` / `fcrypt assym ...` commands return a clear error and symmetric mode remains available.
+
+Binary output:
+
+- Linux/macOS: `target/release/fcrypt`
+- Windows: `target/release/fcrypt.exe`
+
+## Help
+
+Short command-local help:
 
 ```bash
-fcrypt encrypt --input /path/to/report.pdf
+fcrypt -h
+fcrypt encrypt -h
+fcrypt decrypt -h
+fcrypt asym -h
+fcrypt asym encrypt -h
+fcrypt asym decrypt -h
+fcrypt asym sign -h
+fcrypt keygen -h
+fcrypt keygen phrase -h
 ```
 
-Encrypt with paranoic mode:
+Full help for every command, option, alias, and example:
 
 ```bash
-fcrypt encrypt --paranoic --input /path/to/report.pdf
+fcrypt -ha
+fcrypt --help-all
 ```
 
-`--paranoid` is accepted as an alias, and `-p` is the short form.
+`-ha` / `--help-all` is accepted from subcommands too, for example:
 
-Default paranoic Argon2id parameters are 1,048,576 KiB memory, time cost 6, and parallelism 4.
+```bash
+fcrypt asym encrypt -ha
+```
+
+## Command overview
+
+```bash
+# Symmetric mode
+fcrypt encrypt <INPUT> [OPTIONS]
+fcrypt encode  <INPUT> [OPTIONS]
+fcrypt decrypt <INPUT> [OPTIONS]
+fcrypt decode  <INPUT> [OPTIONS]
+
+# Asymmetric PQC .fe mode
+fcrypt asym encrypt <INPUT> [OPTIONS]
+fcrypt asym encode  <INPUT> [OPTIONS]
+fcrypt asym decrypt <INPUT.fe> [OPTIONS]
+fcrypt asym decode  <INPUT.fe> [OPTIONS]
+fcrypt asym sign    <INPUT.fe> [OPTIONS]
+
+# Alias
+fcrypt assym ...    # accepted alias for fcrypt asym ...
+
+# Key generation
+fcrypt keygen <N>
+fcrypt keygen phrase <N> [OPTIONS]
+```
+
+`encrypt` and `encode` are aliases. `decrypt` and `decode` are aliases. `asym` and `assym` are aliases.
+
+## Symmetric password-based usage
+
+Encrypt a file:
+
+```bash
+fcrypt encrypt report.pdf
+```
+
+Equivalent alias:
+
+```bash
+fcrypt encode report.pdf
+```
+
+The output is:
+
+```text
+report.pdf.fe
+```
 
 Decrypt:
 
 ```bash
-fcrypt decrypt --input /path/to/report.pdf.enc
+fcrypt decrypt report.pdf.fe
 ```
 
-Force overwrite (skip confirmation):
+Equivalent alias:
 
 ```bash
-fcrypt decrypt --input /path/to/report.pdf.enc --force
+fcrypt decode report.pdf.fe
 ```
 
-Generate a random password:
+Force overwrite of an existing output file:
+
+```bash
+fcrypt decrypt report.pdf.fe --force
+```
+
+Use the high-resource symmetric cascade mode:
+
+```bash
+fcrypt encrypt --paranoic report.pdf
+```
+
+Aliases:
+
+```bash
+fcrypt encrypt --paranoid report.pdf
+fcrypt encrypt -p report.pdf
+```
+
+Default `--paranoic` parameters use high Argon2id cost and AES-GCM-then-Serpent-EAX cascade encryption.
+
+## Asymmetric PQC `.fe` usage
+
+### Encrypt with automatically generated recipient keys
+
+```bash
+fcrypt asym encrypt report.pdf
+```
+
+Equivalent aliases:
+
+```bash
+fcrypt asym encode report.pdf
+fcrypt assym encrypt report.pdf
+fcrypt assym encode report.pdf
+```
+
+Output:
+
+```text
+report.pdf.fe
+report_keys/
+  <label8>_recipient_default.pub
+  <label8>_recipient_default.sec
+```
+
+Example:
+
+```text
+report_keys/
+  a13f2c9b_recipient_default.pub
+  a13f2c9b_recipient_default.sec
+```
+
+Move the `.sec` file to a safe location if the encrypted file may be shared or archived with the folder.
+
+### Encrypt for an existing recipient
+
+```bash
+fcrypt asym encrypt report.pdf -r ./alice_recipient.pub
+```
+
+Long option:
+
+```bash
+fcrypt asym encrypt report.pdf --recipient-public ./alice_recipient.pub
+```
+
+When `-r` / `--recipient-public` is provided, no new recipient keypair is generated.
+
+### Choose a key directory
+
+By default, keys are saved next to the input file in `<file_stem>_keys`:
+
+```text
+report.pdf        -> report_keys/
+docs/report.pdf   -> docs/report_keys/
+archive.tar.gz    -> archive.tar_keys/
+```
+
+Override it with `-k` / `--keys-dir`:
+
+```bash
+fcrypt asym encrypt report.pdf -k ./keys
+```
+
+When `--keys-dir` is provided, `fcrypt` uses that directory directly and does not create a nested `report_keys/` directory.
+
+### Decrypt
+
+```bash
+fcrypt asym decrypt report.pdf.fe -i ./report_keys/a13f2c9b_recipient_default.sec
+```
+
+Equivalent alias:
+
+```bash
+fcrypt asym decode report.pdf.fe -i ./report_keys/a13f2c9b_recipient_default.sec
+```
+
+If `-i` / `--identity` is omitted, `fcrypt` tries to find a matching recipient secret key in the default or provided keys directory:
+
+```bash
+fcrypt asym decrypt report.pdf.fe
+fcrypt asym decrypt report.pdf.fe -k ./report_keys
+```
+
+Matching is done by the full key id inside the key bundle, not by the short filename prefix.
+
+### Encrypt and sign
+
+Generate a signing key automatically and embed a signature in the `.fe` file:
+
+```bash
+fcrypt asym encrypt report.pdf -s
+```
+
+Generated files:
+
+```text
+report.pdf.fe
+report_keys/
+  <label8>_recipient_default.pub
+  <label8>_recipient_default.sec
+  <label8>_signer_mldsa87.pub
+  <label8>_signer_mldsa87.sec
+```
+
+Sign with an existing signing key:
+
+```bash
+fcrypt asym encrypt report.pdf -S ./sender_signer.sec
+```
+
+`-S` / `--sign-key` automatically enables signing, so this is equivalent to `-s -S ./sender_signer.sec`.
+
+### Sign an existing `.fe` file
+
+Create a detached signature:
+
+```bash
+fcrypt asym sign report.pdf.fe
+```
+
+Output:
+
+```text
+report.pdf.fe.sig
+```
+
+Use an existing signing key:
+
+```bash
+fcrypt asym sign report.pdf.fe -S ./sender_signer.sec
+```
+
+Embed the signature into the `.fe` envelope:
+
+```bash
+fcrypt asym sign report.pdf.fe -e
+```
+
+### Verify signatures while decrypting
+
+Verify with a signer public key:
+
+```bash
+fcrypt asym decrypt report.pdf.fe \
+  -i ./report_keys/a13f2c9b_recipient_default.sec \
+  -v ./sender_signer.pub
+```
+
+Require a valid signature:
+
+```bash
+fcrypt asym decrypt report.pdf.fe \
+  -i ./report_keys/a13f2c9b_recipient_default.sec \
+  -v ./sender_signer.pub \
+  -R
+```
+
+If `-R` / `--require-signature` is used and no valid embedded or detached signature is available, decryption fails.
+
+## Asymmetric options
+
+### `asym encrypt` / `asym encode`
+
+```text
+-o, --output <FILE>             Destination .fe file. Defaults to <INPUT>.fe.
+-r, --recipient-public <FILE>   Recipient public key bundle.
+-k, --keys-dir <DIR>            Directory for generated or discovered keys.
+-s, --sign                      Embed an ML-DSA-87 signature in the result.
+-S, --sign-key <FILE>           Signing secret key. Implies --sign.
+-f, --force                     Overwrite the destination file without asking.
+```
+
+### `asym decrypt` / `asym decode`
+
+```text
+-o, --output <FILE>             Destination plaintext file. Defaults to <INPUT.fe without .fe>.
+-i, --identity <FILE>           Recipient secret key bundle.
+-k, --keys-dir <DIR>            Directory for recipient secret key auto-discovery.
+-v, --verify <FILE>             Signing public key for signature verification.
+-R, --require-signature         Require a valid signature before decrypting.
+-f, --force                     Overwrite the destination file without asking.
+```
+
+### `asym sign`
+
+```text
+-o, --output <FILE>             Detached signature output, or embedded output with --embed.
+-S, --sign-key <FILE>           Signing secret key bundle. Generated if omitted.
+-k, --keys-dir <DIR>            Directory for generated signing keys.
+-e, --embed                     Embed the signature into the .fe envelope.
+-f, --force                     Overwrite the destination file without asking.
+```
+
+## Key generation
+
+### Random password
 
 ```bash
 fcrypt keygen 32
 ```
 
-`keygen` writes only the generated password to stdout followed by a newline. The password length must be between 1 and 4096 characters. The alphabet contains `A-Z`, `a-z`, `0-9`, and portable ASCII special characters: `!#$%&()*+,-./:;<=>?@[]^_{|}~`.
+`keygen <N>` writes a random password with `N` characters to stdout followed by a newline. `N` must be between 1 and 4096.
 
-## Output naming rules
+The password generator uses the operating system CSPRNG and this portable alphabet:
 
-- Encryption appends `.enc` to the full filename:
-  - `report.pdf` -> `report.pdf.enc`
-- Decryption:
-  - if input ends with `.enc`, that suffix is removed
-    - `report.pdf.enc` -> `report.pdf`
-  - otherwise `.dec` is appended
-    - `archive.bin` -> `archive.bin.dec`
+```text
+A-Z a-z 0-9 ! # $ % & ( ) * + , - . / : ; < = > ? @ [ ] ^ _ { | } ~
+```
+
+### Random passphrase
+
+Generate a phrase from the embedded EFF large wordlist:
+
+```bash
+fcrypt keygen phrase 7
+```
+
+Use a custom separator:
+
+```bash
+fcrypt keygen phrase 7 -sep .
+fcrypt keygen phrase 7 --sep _
+fcrypt keygen phrase 7 -s " "
+```
+
+`keygen phrase` uses the embedded EFF large wordlist with 7,776 words. Word selection is cryptographically random and uniform. The default separator is `-`.
+
+Examples:
+
+```bash
+fcrypt keygen phrase 6
+fcrypt keygen phrase 8 --sep _
+```
+
+## File formats
+
+### Symmetric format
+
+Symmetric encryption keeps the compact binary format used by the existing password-based mode:
+
+```text
+16 bytes: random salt
+8 bytes:  random nonce prefix
+8 bytes:  plaintext length, authenticated as AEAD AAD
+encrypted AES-GCM chunks
+```
+
+The `--paranoic` symmetric mode uses a versioned binary metadata header and a cascade of AES-GCM and Serpent-EAX. The header is authenticated as AAD.
+
+Compatibility note: `fcrypt` can decrypt legacy empty files produced before `0.1.1` that contain only the old 32-byte prefix. Those legacy empty files do not contain an authentication tag, so password correctness and integrity cannot be verified for that specific legacy case.
+
+### Asymmetric `.fe` format
+
+Asymmetric `.fe` files use a versioned envelope:
+
+```text
+magic:      FCRYPTFE
+version:    1
+header_len: u32
+header:     CBOR HeaderV1
+payload:    AES-256-GCM encrypted chunks
+```
+
+The current asymmetric suite id is:
+
+```text
+fcrypt-fe-v1-default-mlkem1024-hqc256-hkdfsha3-512-aes256gcm
+```
+
+The `.fe` header contains recipient KEM ciphertexts, wrapped file secret, AEAD metadata, header hash, and optional ML-DSA-87 signature metadata.
+
+For compatibility, the reader also accepts the earlier asymmetric suite/mode name that used `paranoid` in internal metadata and key filenames. New files and new keys use `default`.
+
+## Output naming
+
+Encryption appends `.fe` to the full filename:
+
+```text
+report.pdf -> report.pdf.fe
+```
+
+Decryption removes `.fe` when present:
+
+```text
+report.pdf.fe -> report.pdf
+```
+
+Legacy `.enc` suffixes are still accepted by symmetric decryption:
+
+```text
+old-file.enc -> old-file
+```
+
+If the input has neither `.fe` nor `.enc`, decryption appends `.dec`:
+
+```text
+archive.bin -> archive.bin.dec
+```
 
 Source files are never modified in place.
 
-## Tests
+## Release artifacts and package repositories
 
-Run:
+The release workflow builds raw binaries and SHA-256 checksum files for Linux, macOS, and Windows. Tagging a release with `vX.Y.Z` triggers GitHub Actions release automation.
+
+APT and RPM repositories are published by the package repository workflow when repository signing secrets are configured. See [`docs/PACKAGE_REPOSITORIES.md`](docs/PACKAGE_REPOSITORIES.md) for setup and install commands.
+
+Release process details are documented in [`RELEASE.md`](RELEASE.md).
+
+## Development
+
+Run tests:
 
 ```bash
-cargo test
+cargo test --locked
 ```
 
-Included tests cover:
+Run clippy:
 
-- small-file roundtrip
-- chunk-boundary roundtrips
-- empty-file roundtrip
-- empty-file authentication and legacy empty-file compatibility
-- wrong password failure
-- corrupted ciphertext failure
-- truncated ciphertext failure
-- filename mapping rules
-- overwrite decision logic
+```bash
+cargo clippy --all-targets --all-features -- -D warnings
+```
 
-## GitHub release
+Build release:
 
-- CI (`.github/workflows/ci.yml`) validates format, clippy, tests, and release build on Linux/macOS/Windows.
-- Tagging a release (`vX.Y.Z`) triggers `.github/workflows/release.yml`.
-- Release workflow builds platform binaries, packages artifacts, creates SHA-256 checksums, and publishes a GitHub Release.
-- Package repository workflow builds signed `.deb` and `.rpm` packages, attaches them to tag releases, and publishes APT/RPM repositories to GitHub Pages.
+```bash
+cargo build --release --locked
+```
 
-Detailed steps: see `RELEASE.md`.
+Build without asymmetric PQC mode:
+
+```bash
+cargo build --release --locked --no-default-features
+```
+
+## Test coverage
+
+The test suite covers:
+
+- symmetric small-file, empty-file, and chunk-boundary roundtrips;
+- wrong password, corrupted ciphertext, and truncated file failures;
+- authenticated empty-file handling and legacy empty-file compatibility;
+- asymmetric `.fe` roundtrips;
+- explicit recipient public key encryption and secret key decryption;
+- recipient key auto-discovery;
+- embedded and detached ML-DSA-87 signatures;
+- required signature failures;
+- tamper detection for envelope/ciphertext/signature changes;
+- output naming rules;
+- overwrite behavior;
+- random password and EFF wordlist passphrase generation;
+- `-ha` / `--help-all` output.
+
+## Security notes
+
+- Keep `.sec` files private.
+- Share only `.pub` files.
+- A recipient `.sec` key can decrypt matching `.fe` files.
+- A signer `.sec` key can create signatures as that signer.
+- Use `-R` / `--require-signature` when authenticity is mandatory.
+- Keep backups of recipient secret keys; losing the matching recipient `.sec` key makes `.fe` recovery impossible.
+- Password-based files cannot be recovered without the original password.
+
+## License
+
+MIT. See [`LICENSE`](LICENSE).

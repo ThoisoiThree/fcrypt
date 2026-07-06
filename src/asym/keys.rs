@@ -1,0 +1,526 @@
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+use rand::rngs::OsRng;
+use rand::RngCore;
+use serde::{Deserialize, Serialize};
+use sha3::{Digest, Sha3_256};
+use std::fs;
+use std::io::{BufReader, BufWriter, Write};
+use std::path::{Path, PathBuf};
+use tempfile::NamedTempFile;
+
+use crate::asym::{envelope, pqc};
+use crate::error::{AppError, Result};
+
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
+const RECIPIENT_MODE: &str = "default";
+const LEGACY_RECIPIENT_MODE: &str = "paranoid";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecipientAlgorithms {
+    pub kem_1: String,
+    pub kem_2: String,
+    pub kdf: String,
+    pub aead: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecipientPublicKeyBundle {
+    pub version: u16,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub mode: String,
+    pub algorithms: RecipientAlgorithms,
+    pub label8: String,
+    pub key_id: String,
+    pub mlkem1024_public: String,
+    pub hqc256_public: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecipientSecretKeyBundle {
+    pub version: u16,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub mode: String,
+    pub algorithms: RecipientAlgorithms,
+    pub label8: String,
+    pub key_id: String,
+    pub mlkem1024_secret: String,
+    pub hqc256_secret: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SigningPublicKeyBundle {
+    pub version: u16,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub algorithm: String,
+    pub hash: String,
+    pub label8: String,
+    pub key_id: String,
+    pub mldsa87_public: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SigningSecretKeyBundle {
+    pub version: u16,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub algorithm: String,
+    pub hash: String,
+    pub label8: String,
+    pub key_id: String,
+    pub mldsa87_secret: String,
+}
+
+pub struct GeneratedRecipientKeys {
+    pub public: RecipientPublicKeyBundle,
+    pub secret: RecipientSecretKeyBundle,
+    pub public_path: PathBuf,
+    pub secret_path: PathBuf,
+}
+
+pub struct GeneratedSigningKeys {
+    pub public: SigningPublicKeyBundle,
+    pub secret: SigningSecretKeyBundle,
+    pub public_path: PathBuf,
+    pub secret_path: PathBuf,
+}
+
+#[derive(Serialize)]
+struct RecipientPublicMaterial<'a> {
+    version: u16,
+    #[serde(rename = "type")]
+    kind: &'static str,
+    mode: &'a str,
+    algorithms: RecipientAlgorithms,
+    #[serde(with = "serde_bytes")]
+    mlkem1024_public: &'a [u8],
+    #[serde(with = "serde_bytes")]
+    hqc256_public: &'a [u8],
+}
+
+#[derive(Serialize)]
+struct SigningPublicMaterial<'a> {
+    version: u16,
+    #[serde(rename = "type")]
+    kind: &'static str,
+    algorithm: &'static str,
+    hash: &'static str,
+    #[serde(with = "serde_bytes")]
+    mldsa87_public: &'a [u8],
+}
+
+impl RecipientPublicKeyBundle {
+    pub fn mlkem1024_public_bytes(&self) -> Result<Vec<u8>> {
+        decode_base64(&self.mlkem1024_public, "mlkem1024_public")
+    }
+
+    pub fn hqc256_public_bytes(&self) -> Result<Vec<u8>> {
+        decode_base64(&self.hqc256_public, "hqc256_public")
+    }
+}
+
+impl RecipientSecretKeyBundle {
+    pub fn mlkem1024_secret_bytes(&self) -> Result<Vec<u8>> {
+        decode_base64(&self.mlkem1024_secret, "mlkem1024_secret")
+    }
+
+    pub fn hqc256_secret_bytes(&self) -> Result<Vec<u8>> {
+        decode_base64(&self.hqc256_secret, "hqc256_secret")
+    }
+}
+
+impl SigningPublicKeyBundle {
+    pub fn mldsa87_public_bytes(&self) -> Result<Vec<u8>> {
+        decode_base64(&self.mldsa87_public, "mldsa87_public")
+    }
+}
+
+impl SigningSecretKeyBundle {
+    pub fn mldsa87_secret_bytes(&self) -> Result<Vec<u8>> {
+        decode_base64(&self.mldsa87_secret, "mldsa87_secret")
+    }
+}
+
+pub fn generate_recipient_key_files(
+    keys_dir: &Path,
+    force: bool,
+) -> Result<GeneratedRecipientKeys> {
+    pqc::ensure_enabled()?;
+    prepare_keys_dir(keys_dir)?;
+    let keypair = pqc::generate_recipient_keypair()?;
+    let material =
+        canonical_recipient_public_material(&keypair.mlkem1024_public, &keypair.hqc256_public)?;
+    let key_id = key_id_hex(&material);
+    let label8 = generate_label8(&material, keys_dir)?;
+    let algorithms = recipient_algorithms();
+
+    let public = RecipientPublicKeyBundle {
+        version: 1,
+        kind: "recipient-public".to_string(),
+        mode: RECIPIENT_MODE.to_string(),
+        algorithms: algorithms.clone(),
+        label8: label8.clone(),
+        key_id: key_id.clone(),
+        mlkem1024_public: STANDARD.encode(&keypair.mlkem1024_public),
+        hqc256_public: STANDARD.encode(&keypair.hqc256_public),
+    };
+    let secret = RecipientSecretKeyBundle {
+        version: 1,
+        kind: "recipient-secret".to_string(),
+        mode: RECIPIENT_MODE.to_string(),
+        algorithms,
+        label8: label8.clone(),
+        key_id,
+        mlkem1024_secret: STANDARD.encode(&keypair.mlkem1024_secret),
+        hqc256_secret: STANDARD.encode(&keypair.hqc256_secret),
+    };
+
+    let public_path = keys_dir.join(format!("{label8}_recipient_default.pub"));
+    let secret_path = keys_dir.join(format!("{label8}_recipient_default.sec"));
+    write_json_atomic(&public_path, &public, false, force)?;
+    write_json_atomic(&secret_path, &secret, true, force)?;
+
+    Ok(GeneratedRecipientKeys {
+        public,
+        secret,
+        public_path,
+        secret_path,
+    })
+}
+
+pub fn generate_signing_key_files(keys_dir: &Path, force: bool) -> Result<GeneratedSigningKeys> {
+    pqc::ensure_enabled()?;
+    prepare_keys_dir(keys_dir)?;
+    let keypair = pqc::generate_signing_keypair()?;
+    let material = canonical_signing_public_material(&keypair.mldsa87_public)?;
+    let key_id = key_id_hex(&material);
+    let label8 = generate_label8(&material, keys_dir)?;
+
+    let public = SigningPublicKeyBundle {
+        version: 1,
+        kind: "signer-public".to_string(),
+        algorithm: "ML-DSA-87".to_string(),
+        hash: "SHA3-512".to_string(),
+        label8: label8.clone(),
+        key_id: key_id.clone(),
+        mldsa87_public: STANDARD.encode(&keypair.mldsa87_public),
+    };
+    let secret = SigningSecretKeyBundle {
+        version: 1,
+        kind: "signer-secret".to_string(),
+        algorithm: "ML-DSA-87".to_string(),
+        hash: "SHA3-512".to_string(),
+        label8: label8.clone(),
+        key_id,
+        mldsa87_secret: STANDARD.encode(&keypair.mldsa87_secret),
+    };
+
+    let public_path = keys_dir.join(format!("{label8}_signer_mldsa87.pub"));
+    let secret_path = keys_dir.join(format!("{label8}_signer_mldsa87.sec"));
+    write_json_atomic(&public_path, &public, false, force)?;
+    write_json_atomic(&secret_path, &secret, true, force)?;
+
+    Ok(GeneratedSigningKeys {
+        public,
+        secret,
+        public_path,
+        secret_path,
+    })
+}
+
+pub fn read_recipient_public_key(path: &Path) -> Result<RecipientPublicKeyBundle> {
+    let bundle: RecipientPublicKeyBundle = read_json(path)?;
+    validate_recipient_public_key(&bundle)?;
+    Ok(bundle)
+}
+
+pub fn read_recipient_secret_key(path: &Path) -> Result<RecipientSecretKeyBundle> {
+    let bundle: RecipientSecretKeyBundle = read_json(path)?;
+    validate_recipient_secret_key(&bundle)?;
+    Ok(bundle)
+}
+
+pub fn read_signing_public_key(path: &Path) -> Result<SigningPublicKeyBundle> {
+    let bundle: SigningPublicKeyBundle = read_json(path)?;
+    validate_signing_public_key(&bundle)?;
+    Ok(bundle)
+}
+
+pub fn read_signing_secret_key(path: &Path) -> Result<SigningSecretKeyBundle> {
+    let bundle: SigningSecretKeyBundle = read_json(path)?;
+    validate_signing_secret_key(&bundle)?;
+    Ok(bundle)
+}
+
+pub fn find_recipient_secret_key(
+    keys_dir: &Path,
+    recipient_key_id: &str,
+) -> Result<RecipientSecretKeyBundle> {
+    if !keys_dir.exists() {
+        return Err(AppError::NoMatchingIdentity);
+    }
+
+    let mut matches = Vec::new();
+    for entry in fs::read_dir(keys_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(is_recipient_secret_key_file_name)
+        {
+            continue;
+        }
+        let bundle = read_recipient_secret_key(&path)?;
+        if bundle.key_id == recipient_key_id {
+            matches.push(bundle);
+        }
+    }
+
+    match matches.len() {
+        0 => Err(AppError::NoMatchingIdentity),
+        1 => Ok(matches.remove(0)),
+        _ => Err(AppError::MultipleMatchingIdentities),
+    }
+}
+
+pub fn write_json_atomic<T: Serialize>(
+    path: &Path,
+    value: &T,
+    secret: bool,
+    force: bool,
+) -> Result<()> {
+    if path.exists() && !force {
+        return Err(AppError::OutputExists(path.to_path_buf()));
+    }
+    let dir = path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    fs::create_dir_all(&dir)?;
+    let mut temp = NamedTempFile::new_in(&dir)?;
+    {
+        let mut writer = BufWriter::new(temp.as_file_mut());
+        serde_json::to_writer_pretty(&mut writer, value)
+            .map_err(|e| AppError::Serialization(e.to_string()))?;
+        writer.write_all(b"\n")?;
+        writer.flush()?;
+    }
+
+    #[cfg(unix)]
+    {
+        let mode = if secret { 0o600 } else { 0o644 };
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(mode))?;
+    }
+
+    temp.as_file_mut().sync_all()?;
+    let result = if force {
+        temp.persist(path)
+    } else {
+        temp.persist_noclobber(path)
+    };
+    result.map(|_| ()).map_err(|e| {
+        if e.error.kind() == std::io::ErrorKind::AlreadyExists {
+            AppError::OutputExists(path.to_path_buf())
+        } else {
+            AppError::Io(e.error)
+        }
+    })
+}
+
+fn prepare_keys_dir(keys_dir: &Path) -> Result<()> {
+    fs::create_dir_all(keys_dir)?;
+    #[cfg(unix)]
+    fs::set_permissions(keys_dir, fs::Permissions::from_mode(0o700))?;
+    Ok(())
+}
+
+fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
+    let file = fs::File::open(path)?;
+    serde_json::from_reader(BufReader::new(file))
+        .map_err(|e| AppError::InvalidAsymmetricKeyFile(format!("{}: {e}", path.display())))
+}
+
+fn validate_recipient_public_key(bundle: &RecipientPublicKeyBundle) -> Result<()> {
+    if bundle.version != 1
+        || bundle.kind != "recipient-public"
+        || !is_recipient_mode(&bundle.mode)
+        || !is_recipient_algorithms(&bundle.algorithms)
+    {
+        return Err(AppError::InvalidAsymmetricKeyFile(
+            "not a default recipient public key bundle".to_string(),
+        ));
+    }
+    let mlkem = bundle.mlkem1024_public_bytes()?;
+    let hqc = bundle.hqc256_public_bytes()?;
+    let material = canonical_recipient_public_material_with_mode(&bundle.mode, &mlkem, &hqc)?;
+    let expected_key_id = key_id_hex(&material);
+    if bundle.key_id != expected_key_id {
+        return Err(AppError::InvalidAsymmetricKeyFile(
+            "recipient public key_id mismatch".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_recipient_secret_key(bundle: &RecipientSecretKeyBundle) -> Result<()> {
+    if bundle.version != 1
+        || bundle.kind != "recipient-secret"
+        || !is_recipient_mode(&bundle.mode)
+        || !is_recipient_algorithms(&bundle.algorithms)
+        || bundle.label8.len() != 8
+        || !bundle.label8.chars().all(|c| c.is_ascii_hexdigit())
+    {
+        return Err(AppError::InvalidAsymmetricKeyFile(
+            "not a default recipient secret key bundle".to_string(),
+        ));
+    }
+    let _ = bundle.mlkem1024_secret_bytes()?;
+    let _ = bundle.hqc256_secret_bytes()?;
+    Ok(())
+}
+
+fn validate_signing_public_key(bundle: &SigningPublicKeyBundle) -> Result<()> {
+    if bundle.version != 1
+        || bundle.kind != "signer-public"
+        || bundle.algorithm != "ML-DSA-87"
+        || bundle.hash != "SHA3-512"
+    {
+        return Err(AppError::InvalidAsymmetricKeyFile(
+            "not an ML-DSA-87 signing public key bundle".to_string(),
+        ));
+    }
+    let public_key = bundle.mldsa87_public_bytes()?;
+    let material = canonical_signing_public_material(&public_key)?;
+    let expected_key_id = key_id_hex(&material);
+    if bundle.key_id != expected_key_id {
+        return Err(AppError::InvalidAsymmetricKeyFile(
+            "signing public key_id mismatch".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_signing_secret_key(bundle: &SigningSecretKeyBundle) -> Result<()> {
+    if bundle.version != 1
+        || bundle.kind != "signer-secret"
+        || bundle.algorithm != "ML-DSA-87"
+        || bundle.hash != "SHA3-512"
+        || bundle.label8.len() != 8
+        || !bundle.label8.chars().all(|c| c.is_ascii_hexdigit())
+    {
+        return Err(AppError::InvalidAsymmetricKeyFile(
+            "not an ML-DSA-87 signing secret key bundle".to_string(),
+        ));
+    }
+    let _ = bundle.mldsa87_secret_bytes()?;
+    Ok(())
+}
+
+fn canonical_recipient_public_material(mlkem_public: &[u8], hqc_public: &[u8]) -> Result<Vec<u8>> {
+    canonical_recipient_public_material_with_mode(RECIPIENT_MODE, mlkem_public, hqc_public)
+}
+
+fn canonical_recipient_public_material_with_mode(
+    mode: &str,
+    mlkem_public: &[u8],
+    hqc_public: &[u8],
+) -> Result<Vec<u8>> {
+    let material = RecipientPublicMaterial {
+        version: 1,
+        kind: "recipient-public",
+        mode,
+        algorithms: recipient_algorithms(),
+        mlkem1024_public: mlkem_public,
+        hqc256_public: hqc_public,
+    };
+    envelope::encode_cbor(&material)
+}
+
+fn canonical_signing_public_material(public_key: &[u8]) -> Result<Vec<u8>> {
+    let material = SigningPublicMaterial {
+        version: 1,
+        kind: "signer-public",
+        algorithm: "ML-DSA-87",
+        hash: "SHA3-512",
+        mldsa87_public: public_key,
+    };
+    envelope::encode_cbor(&material)
+}
+
+fn key_id_hex(canonical_public_bundle: &[u8]) -> String {
+    let mut hasher = Sha3_256::new();
+    hasher.update(b"fcrypt-key-id-v1");
+    hasher.update(canonical_public_bundle);
+    hex::encode(hasher.finalize())
+}
+
+fn generate_label8(canonical_public_bundle: &[u8], keys_dir: &Path) -> Result<String> {
+    for _ in 0..128 {
+        let mut seed = [0u8; 32];
+        OsRng.fill_bytes(&mut seed);
+        let mut hasher = Sha3_256::new();
+        hasher.update(b"fcrypt-key-label-v1");
+        hasher.update(seed);
+        hasher.update(canonical_public_bundle);
+        let label = hex::encode(hasher.finalize());
+        let label8 = label[..8].to_string();
+        if !label_exists(keys_dir, &label8)? {
+            return Ok(label8);
+        }
+    }
+    Err(AppError::InvalidAsymmetricKeyFile(
+        "could not allocate a unique key label".to_string(),
+    ))
+}
+
+fn label_exists(keys_dir: &Path, label8: &str) -> Result<bool> {
+    if !keys_dir.exists() {
+        return Ok(false);
+    }
+    for entry in fs::read_dir(keys_dir)? {
+        let entry = entry?;
+        if entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.starts_with(label8))
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn recipient_algorithms() -> RecipientAlgorithms {
+    RecipientAlgorithms {
+        kem_1: "ML-KEM-1024".to_string(),
+        kem_2: "HQC-256".to_string(),
+        kdf: "HKDF-SHA3-512".to_string(),
+        aead: "AES-256-GCM".to_string(),
+    }
+}
+
+fn is_recipient_algorithms(algorithms: &RecipientAlgorithms) -> bool {
+    algorithms.kem_1 == "ML-KEM-1024"
+        && algorithms.kem_2 == "HQC-256"
+        && algorithms.kdf == "HKDF-SHA3-512"
+        && algorithms.aead == "AES-256-GCM"
+}
+
+fn is_recipient_mode(mode: &str) -> bool {
+    mode == RECIPIENT_MODE || mode == LEGACY_RECIPIENT_MODE
+}
+
+fn is_recipient_secret_key_file_name(name: &str) -> bool {
+    name.ends_with("_recipient_default.sec") || name.ends_with("_recipient_paranoid.sec")
+}
+
+fn decode_base64(input: &str, field: &str) -> Result<Vec<u8>> {
+    STANDARD
+        .decode(input.as_bytes())
+        .map_err(|_| AppError::InvalidAsymmetricKeyFile(format!("invalid base64 field: {field}")))
+}

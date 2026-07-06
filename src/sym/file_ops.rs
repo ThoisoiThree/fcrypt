@@ -3,8 +3,8 @@ use std::io::{BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
 
-use crate::crypto::{self, CryptoConfig, CryptoMode};
 use crate::error::{AppError, Result};
+use crate::sym::crypto::{self, CryptoConfig, CryptoMode};
 
 pub fn encrypt_file<F>(
     input_path: &Path,

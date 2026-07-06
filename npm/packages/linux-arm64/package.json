@@ -1,6 +1,6 @@
 {
   "name": "@thoisoithree/fcrypt-linux-arm64",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Prebuilt fcrypt binary for Linux arm64",
   "license": "MIT",
   "repository": {

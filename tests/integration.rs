@@ -2,13 +2,27 @@ use std::cell::Cell;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use filecrypt::crypto::{
+use assert_cmd::Command as AssertCommand;
+use clap::Parser;
+#[cfg(feature = "pqc")]
+use filecrypt::asym;
+use filecrypt::asym::cli::AssymCommand;
+#[cfg(feature = "pqc")]
+use filecrypt::asym::cli::{AssymDecryptArgs, AssymEncryptArgs, AssymSignArgs};
+use filecrypt::cli::{Cli, Command as CliCommand};
+use filecrypt::error::AppError;
+use filecrypt::keygen::phrase;
+use filecrypt::sym::crypto::{
     CryptoConfig, CryptoMode, FILE_PREFIX_LEN, PARANOID_FLAG, TAG_LEN, VERSIONED_HEADER_LEN,
 };
-use filecrypt::error::AppError;
-use filecrypt::file_ops::{decrypt_file, encrypt_file, encrypt_file_with_mode};
-use filecrypt::overwrite::resolve_overwrite;
-use filecrypt::pathing::{decryption_output_path, encryption_output_path};
+use filecrypt::sym::file_ops::{decrypt_file, encrypt_file, encrypt_file_with_mode};
+use filecrypt::sym::overwrite::resolve_overwrite;
+use filecrypt::sym::pathing::{
+    asym_decryption_output_path, asym_default_keys_dir_for_fe_input,
+    asym_default_keys_dir_for_plain_input, asym_encryption_output_path, decryption_output_path,
+    encryption_output_path,
+};
+use predicates::str::contains;
 use tempfile::tempdir;
 
 fn test_config(chunk_size: usize) -> CryptoConfig {
@@ -178,12 +192,18 @@ fn filename_mapping_behavior() {
     let p1 = Path::new("report.pdf");
     assert_eq!(
         encryption_output_path(p1).expect("mapping must succeed"),
-        PathBuf::from("report.pdf.enc")
+        PathBuf::from("report.pdf.fe")
     );
 
-    let p2 = Path::new("report.pdf.enc");
+    let p2 = Path::new("report.pdf.fe");
     assert_eq!(
         decryption_output_path(p2).expect("mapping must succeed"),
+        PathBuf::from("report.pdf")
+    );
+
+    let p2_legacy = Path::new("report.pdf.enc");
+    assert_eq!(
+        decryption_output_path(p2_legacy).expect("legacy mapping must succeed"),
         PathBuf::from("report.pdf")
     );
 
@@ -192,6 +212,314 @@ fn filename_mapping_behavior() {
         decryption_output_path(p3).expect("mapping must succeed"),
         PathBuf::from("report.pdf.data.dec")
     );
+}
+
+#[test]
+fn asymmetric_path_mapping_behavior() {
+    let p1 = Path::new("report.pdf");
+    assert_eq!(
+        asym_encryption_output_path(p1).expect("mapping must succeed"),
+        PathBuf::from("report.pdf.fe")
+    );
+    assert_eq!(
+        asym_default_keys_dir_for_plain_input(p1).expect("keys dir must resolve"),
+        PathBuf::from("report_keys")
+    );
+
+    let p2 = Path::new("docs/report.pdf");
+    assert_eq!(
+        asym_default_keys_dir_for_plain_input(p2).expect("keys dir must resolve"),
+        PathBuf::from("docs/report_keys")
+    );
+
+    let p3 = Path::new("report.pdf.fe");
+    assert_eq!(
+        asym_decryption_output_path(p3).expect("mapping must succeed"),
+        PathBuf::from("report.pdf")
+    );
+    assert_eq!(
+        asym_default_keys_dir_for_fe_input(p3).expect("keys dir must resolve"),
+        PathBuf::from("report_keys")
+    );
+}
+
+#[test]
+fn cli_aliases_parse_to_same_commands() {
+    let encrypt = Cli::parse_from(["fcrypt", "encrypt", "notes.txt"]);
+    let encode = Cli::parse_from(["fcrypt", "encode", "notes.txt"]);
+    assert!(matches!(encrypt.command, CliCommand::Encrypt(_)));
+    assert!(matches!(encode.command, CliCommand::Encrypt(_)));
+
+    let decrypt = Cli::parse_from(["fcrypt", "decrypt", "notes.txt.fe"]);
+    let decode = Cli::parse_from(["fcrypt", "decode", "notes.txt.fe"]);
+    assert!(matches!(decrypt.command, CliCommand::Decrypt(_)));
+    assert!(matches!(decode.command, CliCommand::Decrypt(_)));
+
+    let asym = Cli::parse_from(["fcrypt", "asym", "encrypt", "notes.txt"]);
+    let assym = Cli::parse_from(["fcrypt", "assym", "encode", "notes.txt"]);
+    assert!(matches!(
+        asym.command,
+        CliCommand::Assym {
+            command: AssymCommand::Encrypt(_)
+        }
+    ));
+    assert!(matches!(
+        assym.command,
+        CliCommand::Assym {
+            command: AssymCommand::Encrypt(_)
+        }
+    ));
+}
+
+#[test]
+fn help_all_forms_exit_successfully() {
+    for args in [
+        vec!["-ha"],
+        vec!["--help-all"],
+        vec!["asym", "-ha"],
+        vec!["asym", "encrypt", "-ha"],
+    ] {
+        AssertCommand::cargo_bin("fcrypt")
+            .expect("binary must build")
+            .args(args)
+            .assert()
+            .success()
+            .stdout(contains("Asymmetric PQC .fe Mode"))
+            .stdout(contains("encrypt and encode are aliases"))
+            .stdout(contains("asym and assym are aliases"));
+    }
+}
+
+#[test]
+fn keygen_phrase_uses_embedded_eff_wordlist() {
+    let generated = phrase::generate_phrase(5, ".").expect("phrase must be generated");
+    let parts: Vec<_> = generated.split('.').collect();
+    assert_eq!(parts.len(), 5);
+    assert!(parts.iter().all(|word| phrase::words().contains(word)));
+    assert_eq!(phrase::words().len(), 7776);
+}
+
+#[test]
+fn keygen_phrase_cli_accepts_sep_alias() {
+    let output = AssertCommand::cargo_bin("fcrypt")
+        .expect("binary must build")
+        .args(["keygen", "phrase", "4", "-sep", "."])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let output = String::from_utf8(output).expect("phrase output must be utf-8");
+    let phrase = output.trim_end();
+    let parts: Vec<_> = phrase.split('.').collect();
+    assert_eq!(parts.len(), 4);
+    assert!(parts.iter().all(|word| phrase::words().contains(word)));
+}
+
+#[cfg(feature = "pqc")]
+#[test]
+fn asymmetric_roundtrip_with_generated_identity() {
+    let dir = tempdir().expect("tempdir must be created");
+    let input = dir.path().join("report.pdf");
+    let decrypted = dir.path().join("report.decoded.pdf");
+    let original = deterministic_bytes(160);
+    fs::write(&input, &original).expect("input file must be written");
+
+    let encrypt_args = AssymEncryptArgs {
+        input: input.clone(),
+        output: None,
+        recipient_public: None,
+        keys_dir: None,
+        sign: false,
+        sign_key: None,
+        force: false,
+    };
+    let outcome = asym::encrypt::encrypt_file(&encrypt_args, &test_config(64), |_| {})
+        .expect("asymmetric encryption must succeed");
+
+    assert_eq!(outcome.output, dir.path().join("report.pdf.fe"));
+    assert_eq!(outcome.keys_dir, dir.path().join("report_keys"));
+    let recipient_secret = outcome
+        .generated_recipient_secret
+        .expect("recipient secret must be generated");
+    let recipient_public = outcome
+        .generated_recipient_public
+        .expect("recipient public must be generated");
+    assert_key_name(&recipient_secret, "_recipient_default.sec");
+    assert_key_name(&recipient_public, "_recipient_default.pub");
+    assert_eq!(json_field(&recipient_secret, "mode"), "default");
+    assert_eq!(json_field(&recipient_public, "mode"), "default");
+    assert_eq!(
+        &fs::read(&outcome.output).expect("encrypted output must be readable")[..8],
+        b"FCRYPTFE"
+    );
+
+    let decrypt_args = AssymDecryptArgs {
+        input: outcome.output,
+        output: Some(decrypted.clone()),
+        identity: Some(recipient_secret),
+        keys_dir: None,
+        verify: None,
+        require_signature: false,
+        force: false,
+    };
+    asym::decrypt::decrypt_file(&decrypt_args, |_| {}).expect("decryption must succeed");
+    assert_eq!(
+        fs::read(decrypted).expect("decrypted output must be readable"),
+        original
+    );
+}
+
+#[cfg(feature = "pqc")]
+#[test]
+fn asymmetric_roundtrip_with_embedded_signature_verification() {
+    let dir = tempdir().expect("tempdir must be created");
+    let input = dir.path().join("signed.bin");
+    let decrypted = dir.path().join("signed.out");
+    let original = deterministic_bytes(96);
+    fs::write(&input, &original).expect("input file must be written");
+
+    let encrypt_args = AssymEncryptArgs {
+        input,
+        output: None,
+        recipient_public: None,
+        keys_dir: None,
+        sign: true,
+        sign_key: None,
+        force: false,
+    };
+    let outcome = asym::encrypt::encrypt_file(&encrypt_args, &test_config(48), |_| {})
+        .expect("signed asymmetric encryption must succeed");
+    let recipient_secret = outcome
+        .generated_recipient_secret
+        .expect("recipient secret must be generated");
+    let signer_public = outcome
+        .generated_signer_public
+        .expect("signer public must be generated");
+    let signer_secret = outcome
+        .generated_signer_secret
+        .expect("signer secret must be generated");
+    assert_key_name(&signer_public, "_signer_mldsa87.pub");
+    assert_key_name(&signer_secret, "_signer_mldsa87.sec");
+
+    let decrypt_args = AssymDecryptArgs {
+        input: outcome.output,
+        output: Some(decrypted.clone()),
+        identity: Some(recipient_secret),
+        keys_dir: None,
+        verify: Some(signer_public),
+        require_signature: true,
+        force: false,
+    };
+    asym::decrypt::decrypt_file(&decrypt_args, |_| {})
+        .expect("signed decryption with verification must succeed");
+    assert_eq!(
+        fs::read(decrypted).expect("decrypted output must be readable"),
+        original
+    );
+}
+
+#[cfg(feature = "pqc")]
+#[test]
+fn asymmetric_sign_creates_detached_signature() {
+    let dir = tempdir().expect("tempdir must be created");
+    let input = dir.path().join("detached.bin");
+    fs::write(&input, deterministic_bytes(80)).expect("input file must be written");
+
+    let encrypt_args = AssymEncryptArgs {
+        input,
+        output: None,
+        recipient_public: None,
+        keys_dir: None,
+        sign: false,
+        sign_key: None,
+        force: false,
+    };
+    let encrypt_outcome = asym::encrypt::encrypt_file(&encrypt_args, &test_config(40), |_| {})
+        .expect("asymmetric encryption must succeed");
+    let sign_args = AssymSignArgs {
+        input: encrypt_outcome.output.clone(),
+        output: None,
+        sign_key: None,
+        keys_dir: None,
+        embed: false,
+        force: false,
+    };
+    let sign_outcome = asym::sign::sign_file(&sign_args).expect("detached signing must succeed");
+    assert!(!sign_outcome.embedded);
+    assert_eq!(sign_outcome.output, dir.path().join("detached.bin.fe.sig"));
+    assert!(sign_outcome.output.exists());
+}
+
+#[cfg(feature = "pqc")]
+#[test]
+fn asymmetric_tampered_ciphertext_fails_without_plaintext_output() {
+    let dir = tempdir().expect("tempdir must be created");
+    let input = dir.path().join("tamper.bin");
+    let decrypted = dir.path().join("tamper.out");
+    fs::write(&input, deterministic_bytes(128)).expect("input file must be written");
+
+    let encrypt_args = AssymEncryptArgs {
+        input,
+        output: None,
+        recipient_public: None,
+        keys_dir: None,
+        sign: false,
+        sign_key: None,
+        force: false,
+    };
+    let outcome = asym::encrypt::encrypt_file(&encrypt_args, &test_config(64), |_| {})
+        .expect("asymmetric encryption must succeed");
+    let recipient_secret = outcome
+        .generated_recipient_secret
+        .expect("recipient secret must be generated");
+    let mut bytes = fs::read(&outcome.output).expect("encrypted output must be readable");
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0x5A;
+    fs::write(&outcome.output, bytes).expect("tampered output must be written");
+
+    let decrypt_args = AssymDecryptArgs {
+        input: outcome.output,
+        output: Some(decrypted.clone()),
+        identity: Some(recipient_secret),
+        keys_dir: None,
+        verify: None,
+        require_signature: false,
+        force: false,
+    };
+    let err = asym::decrypt::decrypt_file(&decrypt_args, |_| {})
+        .expect_err("tampered ciphertext must fail");
+    assert!(matches!(err, AppError::AsymmetricAuthenticationFailed));
+    assert!(
+        !decrypted.exists(),
+        "decrypted output must not be finalized"
+    );
+}
+
+#[cfg(feature = "pqc")]
+fn assert_key_name(path: &Path, suffix: &str) {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("key name must be utf-8");
+    assert!(name.ends_with(suffix));
+    let label = &name[..8];
+    assert!(label
+        .chars()
+        .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)));
+    assert_eq!(name.as_bytes()[8], b'_');
+}
+
+#[cfg(feature = "pqc")]
+fn json_field(path: &Path, field: &str) -> String {
+    let value: serde_json::Value =
+        serde_json::from_slice(&fs::read(path).expect("json key file must be readable"))
+            .expect("json key file must parse");
+    value
+        .get(field)
+        .and_then(|value| value.as_str())
+        .expect("json field must be a string")
+        .to_string()
 }
 
 #[test]
@@ -290,7 +618,7 @@ fn standard_encryption_keeps_legacy_prefix_format() {
     assert_eq!(
         encrypted_len,
         FILE_PREFIX_LEN as u64
-            + filecrypt::crypto::expected_ciphertext_payload_len(
+            + filecrypt::sym::crypto::expected_ciphertext_payload_len(
                 original.len() as u64,
                 config.chunk_size,
             )
