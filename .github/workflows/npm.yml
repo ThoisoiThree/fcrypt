@@ -66,12 +66,14 @@ jobs:
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Permit liboqs Windows ARM64 build
-        if: matrix.target == 'aarch64-pc-windows-msvc'
-        shell: pwsh
-        run: '"OQS_PERMIT_UNSUPPORTED_ARCHITECTURE=ON" >> $env:GITHUB_ENV'
-
       - name: Build release binary
+        if: matrix.target != 'aarch64-pc-windows-msvc'
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Build release binary (Windows ARM64)
+        if: matrix.target == 'aarch64-pc-windows-msvc'
+        env:
+          OQS_PERMIT_UNSUPPORTED_ARCHITECTURE: "ON"
         run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Prepare npm package
