@@ -57,20 +57,18 @@ pub enum AppError {
     #[error("Decryption failed: wrong password or file is corrupted.")]
     DecryptionFailed,
 
-    #[error(
-        "This file uses asymmetric .fe format.\nUse: fcrypt asym decrypt {0} -i <recipient_default.sec>"
-    )]
+    #[error("This file should be decrypted with asymmetric mode.\nUse: fcrypt asym decrypt {0} -i <recipient_default.sec>")]
     SymmetricCommandUsedForFe(String),
 
     #[error(
-        "This file does not look like an asymmetric .fe file.\nUse the symmetric command if this is a password-encrypted file:\n  fcrypt decrypt {0}"
+        "This file could not be opened as an asymmetric opaque file.\nUse the symmetric command if this is a password-encrypted file:\n  fcrypt decrypt {0}"
     )]
     NotAsymmetricFile(String),
 
     #[error("Asymmetric PQC mode was not enabled in this build.\nRebuild with feature: pqc")]
     AsymmetricUnavailable,
 
-    #[error("unsupported .fe version: {0}")]
+    #[error("unsupported asymmetric file version: {0}")]
     UnsupportedFeVersion(u16),
 
     #[error("invalid asymmetric file: {0}")]
@@ -79,13 +77,16 @@ pub enum AppError {
     #[error("invalid asymmetric key file: {0}")]
     InvalidAsymmetricKeyFile(String),
 
-    #[error(
-        "No matching recipient secret key found.\nUse: fcrypt asym decrypt <file.fe> -i <recipient_default.sec>"
-    )]
+    #[error("No matching recipient secret key found.\nUse: fcrypt asym decrypt <file.bin> -i <recipient_default.sec>")]
     NoMatchingIdentity,
 
     #[error("Multiple matching recipient secret keys found. Use -i <recipient_default.sec>.")]
     MultipleMatchingIdentities,
+
+    #[error(
+        "Too many recipient secret keys found ({found}); auto-discovery limit is {limit}. Use -i <recipient_default.sec> to select one key."
+    )]
+    TooManyRecipientIdentities { found: usize, limit: usize },
 
     #[error("decryption failed: authentication failed or wrong key")]
     AsymmetricAuthenticationFailed,

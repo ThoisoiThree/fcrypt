@@ -3,13 +3,14 @@ use std::env;
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Write};
+use std::path::Path;
 
 use filecrypt::asym;
 use filecrypt::asym::cli::AssymCommand;
 use filecrypt::cli::{Cli, Command, KeygenCommand};
 use filecrypt::error::Result;
 use filecrypt::keygen;
-use filecrypt::sym::crypto::{CryptoConfig, CryptoMode};
+use filecrypt::sym::crypto::CryptoConfig;
 use filecrypt::sym::{file_ops, overwrite, pathing, progress, prompt};
 
 fn main() {
@@ -37,18 +38,11 @@ fn run() -> Result<()> {
             let password = prompt::prompt_password_for_encryption()?;
             let total = fs::metadata(&input)?.len();
             let pb = progress::create_progress_bar(total, "Encrypting");
-            let mode = if args.paranoic {
-                CryptoMode::Paranoid
-            } else {
-                CryptoMode::Standard
-            };
-
-            let result = file_ops::encrypt_file_with_mode(
+            let result = file_ops::encrypt_file(
                 &input,
                 &output,
                 password.as_str(),
                 &config,
-                mode,
                 allow_overwrite,
                 |n| pb.inc(n),
             );
@@ -60,11 +54,6 @@ fn run() -> Result<()> {
         }
         Command::Decrypt(args) => {
             let input = args.input_path()?;
-            if asym::envelope::is_fe_file(&input)? {
-                return Err(filecrypt::error::AppError::SymmetricCommandUsedForFe(
-                    input.display().to_string(),
-                ));
-            }
             let output = pathing::decryption_output_path(&input)?;
             let allow_overwrite =
                 overwrite::resolve_overwrite(&output, args.force, prompt::confirm_overwrite)?;
@@ -107,6 +96,9 @@ fn run() -> Result<()> {
                 if let Some(path) = outcome.generated_signer_secret {
                     println!("Signing secret key: {}", path.display());
                 }
+                if let Some(path) = outcome.detached_signature {
+                    println!("Detached signature: {}", path.display());
+                }
                 Ok(())
             }
             AssymCommand::Decrypt(args) => {
@@ -147,6 +139,39 @@ fn run() -> Result<()> {
                     let phrase = keygen::generate_phrase(word_count, &separator)?;
                     stdout.write_all(phrase.as_bytes())?;
                     stdout.write_all(b"\n")?;
+                    stdout.flush()?;
+                    Ok(())
+                }
+                Some(KeygenCommand::Pair {
+                    name,
+                    lifetime_days,
+                }) => {
+                    let generated = asym::keys::generate_named_key_pair_files(
+                        Path::new("."),
+                        &name,
+                        lifetime_days,
+                        false,
+                    )?;
+                    writeln!(
+                        stdout,
+                        "Recipient public key: {}",
+                        generated.recipient_public_path.display()
+                    )?;
+                    writeln!(
+                        stdout,
+                        "Recipient secret key: {}",
+                        generated.recipient_secret_path.display()
+                    )?;
+                    writeln!(
+                        stdout,
+                        "Signing public key: {}",
+                        generated.signing_public_path.display()
+                    )?;
+                    writeln!(
+                        stdout,
+                        "Signing secret key: {}",
+                        generated.signing_secret_path.display()
+                    )?;
                     stdout.flush()?;
                     Ok(())
                 }

@@ -2,6 +2,8 @@
 
 If you discover a security issue in `fcrypt`, please report it privately and do not open a public issue.
 
+`einspiegel@protonmail.com`
+
 ## Reporting
 
 1. Provide a clear description of the issue.
@@ -16,12 +18,12 @@ This project focuses on:
 - integrity guarantees and tamper detection
 - safe error handling without leaking sensitive data
 
-## Paranoic mode
+## Opaque format
 
-`fcrypt encrypt -p` / `--paranoic` uses higher Argon2id resource parameters by default: 1,048,576 KiB memory, time cost 6, and parallelism 4. It cascades each file chunk through AES-256-GCM and then Serpent-EAX. Paranoic files use a versioned binary metadata header with the paranoic flag, algorithms, chunk size, Argon2id parameters, plaintext length, salt, and nonce prefixes. That metadata is authenticated as AEAD associated data.
+New encrypted files use the opaque container format. Files do not start with magic bytes, a cleartext version, cleartext algorithm identifiers, or cleartext recipient identifiers. Format metadata is authenticated and encrypted in the manifest, and payload chunk indexes use `u64` nonces.
 
 ## Legacy compatibility
 
-`fcrypt` 0.1.1 and later authenticate newly encrypted empty files with an AES-GCM tag.
+Opaque files authenticate empty inputs with an AEAD tag. Legacy pre-opaque containers are not auto-detected by the current decrypt path because the format intentionally avoids cleartext headers.
 
-For backward compatibility, `fcrypt` still decrypts legacy empty files created before 0.1.1 that contain only the 32-byte file prefix. Those legacy empty files do not contain an authentication tag, so their password and integrity cannot be verified. Re-encrypt empty files with 0.1.1 or later when authenticated empty-file handling is required.
+`fcrypt` `0.3.0` does not provide backward compatibility for files encrypted by `fcrypt` `0.2.0` or earlier. Use `fcrypt` `0.2.0` to read those old files.

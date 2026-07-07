@@ -9,7 +9,8 @@ use crate::error::{AppError, Result};
     name = "fcrypt",
     version,
     about = "Encrypt and decrypt files with password-based and asymmetric PQC encryption.",
-    long_about = None
+    long_about = None,
+    after_help = "Full help:\n  -ha, --help-all    Print full help for every command, option, alias, and example."
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -24,13 +25,13 @@ pub enum Command {
     /// Decrypt a file.
     #[command(visible_alias = "decode")]
     Decrypt(LegacyDecryptArgs),
-    /// Use asymmetric post-quantum .fe file encryption.
+    /// Use asymmetric post-quantum opaque file encryption.
     #[command(name = "asym", visible_alias = "assym")]
     Assym {
         #[command(subcommand)]
         command: AssymCommand,
     },
-    /// Generate random passwords or passphrases.
+    /// Generate random passwords, passphrases, or asymmetric key pairs.
     Keygen(KeygenArgs),
 }
 
@@ -54,6 +55,15 @@ pub enum KeygenCommand {
         #[arg(long = "sep", short = 's', value_name = "SEP", default_value = "-")]
         separator: String,
     },
+    /// Generate recipient and signing public/secret key files.
+    Pair {
+        /// Key file name prefix.
+        #[arg(value_name = "NAME")]
+        name: String,
+        /// Optional key lifetime in days. Omitted means no expiration.
+        #[arg(value_name = "LIFETIME_DAYS")]
+        lifetime_days: Option<u64>,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -69,9 +79,6 @@ pub struct LegacyEncryptArgs {
         conflicts_with = "input"
     )]
     pub input_flag: Option<PathBuf>,
-    /// Use high-resource Argon2id and AES-GCM-then-Serpent-EAX cascade encryption.
-    #[arg(long = "paranoic", alias = "paranoid", short = 'p')]
-    pub paranoic: bool,
     /// Overwrite the destination file without asking.
     #[arg(long, short = 'f')]
     pub force: bool,

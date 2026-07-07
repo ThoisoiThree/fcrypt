@@ -4,15 +4,16 @@
 Name:           fcrypt
 Version:        %{pkg_version}
 Release:        1
-Summary:        Password-based file encryption and decryption CLI
+Summary:        Opaque password and post-quantum file encryption CLI
 
 License:        MIT
 URL:            https://github.com/ThoisoiThree/fcrypt
 
 %description
-fcrypt is a cross-platform command-line utility for password-based file
-encryption and decryption. It uses AES-256-GCM authenticated encryption and
-Argon2id password-based key derivation.
+fcrypt is a cross-platform command-line utility for opaque password-based and
+post-quantum asymmetric file encryption. It uses AES-256-GCM authenticated
+payload encryption, Argon2id password slots, ML-KEM-1024 + HQC-256 recipient
+slots, and detached ML-DSA-87 signatures.
 
 %prep
 
@@ -36,5 +37,5 @@ install -m 0644 %{_sourcedir}/LICENSE %{buildroot}%{_licensedir}/%{name}/LICENSE
 %license %{_licensedir}/%{name}/LICENSE
 
 %changelog
-* Sun May 17 2026 ThoisoiThree <noreply@github.com> - %{pkg_version}-1
+* Tue Jul 07 2026 ThoisoiThree <noreply@github.com> - %{pkg_version}-1
 - Build upstream fcrypt release package.

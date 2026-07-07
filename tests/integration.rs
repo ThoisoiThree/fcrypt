@@ -9,16 +9,16 @@ use filecrypt::asym;
 use filecrypt::asym::cli::AssymCommand;
 #[cfg(feature = "pqc")]
 use filecrypt::asym::cli::{AssymDecryptArgs, AssymEncryptArgs, AssymSignArgs};
+use filecrypt::asym::keys;
 use filecrypt::cli::{Cli, Command as CliCommand};
 use filecrypt::error::AppError;
+use filecrypt::format::opaque;
 use filecrypt::keygen::phrase;
-use filecrypt::sym::crypto::{
-    CryptoConfig, CryptoMode, FILE_PREFIX_LEN, PARANOID_FLAG, TAG_LEN, VERSIONED_HEADER_LEN,
-};
-use filecrypt::sym::file_ops::{decrypt_file, encrypt_file, encrypt_file_with_mode};
+use filecrypt::sym::crypto::{CryptoConfig, TAG_LEN};
+use filecrypt::sym::file_ops::{decrypt_file, encrypt_file};
 use filecrypt::sym::overwrite::resolve_overwrite;
 use filecrypt::sym::pathing::{
-    asym_decryption_output_path, asym_default_keys_dir_for_fe_input,
+    asym_decryption_output_path, asym_default_keys_dir_for_encrypted_input,
     asym_default_keys_dir_for_plain_input, asym_encryption_output_path, decryption_output_path,
     encryption_output_path,
 };
@@ -26,15 +26,7 @@ use predicates::str::contains;
 use tempfile::tempdir;
 
 fn test_config(chunk_size: usize) -> CryptoConfig {
-    CryptoConfig {
-        chunk_size,
-        argon_memory_kib: 8,
-        argon_time_cost: 1,
-        argon_parallelism: 1,
-        paranoid_argon_memory_kib: 8,
-        paranoid_argon_time_cost: 1,
-        paranoid_argon_parallelism: 1,
-    }
+    CryptoConfig { chunk_size }
 }
 
 fn deterministic_bytes(len: usize) -> Vec<u8> {
@@ -60,11 +52,12 @@ fn encrypt_decrypt_roundtrip_small_file() {
         |_| {},
     )
     .expect("encryption must succeed");
+    let decrypt_config = CryptoConfig { chunk_size: 0 };
     decrypt_file(
         &encrypted,
         &decrypted,
         "correct horse battery staple",
-        &config,
+        &decrypt_config,
         false,
         |_| {},
     )
@@ -72,6 +65,94 @@ fn encrypt_decrypt_roundtrip_small_file() {
 
     let decrypted_bytes = fs::read(&decrypted).expect("decrypted file must be readable");
     assert_eq!(decrypted_bytes, original);
+}
+
+#[test]
+fn encrypt_preflight_rejects_oversized_payload_before_writing() {
+    let config = test_config(1);
+    let mut reader = std::io::empty();
+    let mut writer = Vec::new();
+
+    let err = filecrypt::sym::crypto::encrypt_stream(
+        &mut reader,
+        &mut writer,
+        u64::MAX,
+        "oversized",
+        &config,
+        |_| {},
+    )
+    .expect_err("oversized encrypted payload must be rejected");
+
+    assert!(matches!(err, AppError::InputTooLarge));
+    assert!(
+        writer.is_empty(),
+        "preflight failure must happen before writing the prelude"
+    );
+}
+
+#[test]
+fn opaque_password_encrypt_uses_fixed_argon_profile_without_decrypt_config() {
+    let original = deterministic_bytes(48);
+    let config = test_config(17);
+    let mut reader = std::io::Cursor::new(original.as_slice());
+    let mut encrypted = Vec::new();
+
+    opaque::encrypt_password_stream(
+        &mut reader,
+        &mut encrypted,
+        original.len() as u64,
+        "fixed-profile",
+        &config,
+        |_| {},
+    )
+    .expect("opaque password encryption must succeed");
+
+    let encrypted_len = encrypted.len() as u64;
+    let mut encrypted_reader = std::io::Cursor::new(encrypted);
+    let mut decrypted = Vec::new();
+    opaque::decrypt_password_stream(
+        &mut encrypted_reader,
+        &mut decrypted,
+        encrypted_len,
+        "fixed-profile",
+        |_| {},
+    )
+    .expect("opaque password decryption must use the fixed v1 Argon profile");
+
+    assert_eq!(decrypted, original);
+}
+
+#[test]
+fn decrypt_stream_ignores_runtime_config_for_format_params() {
+    let original = deterministic_bytes(48);
+    let encrypt_config = test_config(19);
+    let mut reader = std::io::Cursor::new(original.as_slice());
+    let mut encrypted = Vec::new();
+    filecrypt::sym::crypto::encrypt_stream(
+        &mut reader,
+        &mut encrypted,
+        original.len() as u64,
+        "runtime-config",
+        &encrypt_config,
+        |_| {},
+    )
+    .expect("encryption must succeed");
+
+    let encrypted_len = encrypted.len() as u64;
+    let decrypt_config = CryptoConfig { chunk_size: 0 };
+    let mut encrypted_reader = std::io::Cursor::new(encrypted);
+    let mut decrypted = Vec::new();
+    filecrypt::sym::crypto::decrypt_stream(
+        &mut encrypted_reader,
+        &mut decrypted,
+        encrypted_len,
+        "runtime-config",
+        &decrypt_config,
+        |_| {},
+    )
+    .expect("decrypt must ignore runtime config for opaque format parameters");
+
+    assert_eq!(decrypted, original);
 }
 
 #[test]
@@ -146,10 +227,10 @@ fn corrupted_ciphertext_fails() {
 
     let mut bytes = fs::read(&encrypted).expect("encrypted file must be readable");
     assert!(
-        bytes.len() > FILE_PREFIX_LEN,
+        bytes.len() > opaque::PRELUDE_LEN,
         "encrypted payload should exist"
     );
-    bytes[FILE_PREFIX_LEN] ^= 0x5A;
+    bytes[opaque::PRELUDE_LEN] ^= 0x5A;
     fs::write(&encrypted, bytes).expect("corrupted file must be written");
 
     let err = decrypt_file(&encrypted, &decrypted, "password-1", &config, false, |_| {})
@@ -192,10 +273,10 @@ fn filename_mapping_behavior() {
     let p1 = Path::new("report.pdf");
     assert_eq!(
         encryption_output_path(p1).expect("mapping must succeed"),
-        PathBuf::from("report.pdf.fe")
+        PathBuf::from("report.pdf.bin")
     );
 
-    let p2 = Path::new("report.pdf.fe");
+    let p2 = Path::new("report.pdf.bin");
     assert_eq!(
         decryption_output_path(p2).expect("mapping must succeed"),
         PathBuf::from("report.pdf")
@@ -219,7 +300,7 @@ fn asymmetric_path_mapping_behavior() {
     let p1 = Path::new("report.pdf");
     assert_eq!(
         asym_encryption_output_path(p1).expect("mapping must succeed"),
-        PathBuf::from("report.pdf.fe")
+        PathBuf::from("report.pdf.bin")
     );
     assert_eq!(
         asym_default_keys_dir_for_plain_input(p1).expect("keys dir must resolve"),
@@ -232,13 +313,13 @@ fn asymmetric_path_mapping_behavior() {
         PathBuf::from("docs/report_keys")
     );
 
-    let p3 = Path::new("report.pdf.fe");
+    let p3 = Path::new("report.pdf.bin");
     assert_eq!(
         asym_decryption_output_path(p3).expect("mapping must succeed"),
         PathBuf::from("report.pdf")
     );
     assert_eq!(
-        asym_default_keys_dir_for_fe_input(p3).expect("keys dir must resolve"),
+        asym_default_keys_dir_for_encrypted_input(p3).expect("keys dir must resolve"),
         PathBuf::from("report_keys")
     );
 }
@@ -250,8 +331,8 @@ fn cli_aliases_parse_to_same_commands() {
     assert!(matches!(encrypt.command, CliCommand::Encrypt(_)));
     assert!(matches!(encode.command, CliCommand::Encrypt(_)));
 
-    let decrypt = Cli::parse_from(["fcrypt", "decrypt", "notes.txt.fe"]);
-    let decode = Cli::parse_from(["fcrypt", "decode", "notes.txt.fe"]);
+    let decrypt = Cli::parse_from(["fcrypt", "decrypt", "notes.txt.bin"]);
+    let decode = Cli::parse_from(["fcrypt", "decode", "notes.txt.bin"]);
     assert!(matches!(decrypt.command, CliCommand::Decrypt(_)));
     assert!(matches!(decode.command, CliCommand::Decrypt(_)));
 
@@ -284,10 +365,20 @@ fn help_all_forms_exit_successfully() {
             .args(args)
             .assert()
             .success()
-            .stdout(contains("Asymmetric PQC .fe Mode"))
+            .stdout(contains("Asymmetric PQC Opaque Mode"))
             .stdout(contains("encrypt and encode are aliases"))
             .stdout(contains("asym and assym are aliases"));
     }
+}
+
+#[test]
+fn short_help_mentions_help_all_alias() {
+    AssertCommand::cargo_bin("fcrypt")
+        .expect("binary must build")
+        .arg("-h")
+        .assert()
+        .success()
+        .stdout(contains("-ha, --help-all"));
 }
 
 #[test]
@@ -318,6 +409,92 @@ fn keygen_phrase_cli_accepts_sep_alias() {
 
 #[cfg(feature = "pqc")]
 #[test]
+fn keygen_pair_cli_generates_named_non_expiring_keys() {
+    let dir = tempdir().expect("tempdir must be created");
+
+    AssertCommand::cargo_bin("fcrypt")
+        .expect("binary must build")
+        .current_dir(dir.path())
+        .args(["keygen", "pair", "alice"])
+        .assert()
+        .success()
+        .stdout(contains("alice_recipient_default.pub"))
+        .stdout(contains("alice_recipient_default.sec"))
+        .stdout(contains("alice_signer_mldsa87.pub"))
+        .stdout(contains("alice_signer_mldsa87.sec"));
+
+    let recipient_public = dir.path().join("alice_recipient_default.pub");
+    let recipient_secret = dir.path().join("alice_recipient_default.sec");
+    let signing_public = dir.path().join("alice_signer_mldsa87.pub");
+    let signing_secret = dir.path().join("alice_signer_mldsa87.sec");
+    assert!(recipient_public.exists());
+    assert!(recipient_secret.exists());
+    assert!(signing_public.exists());
+    assert!(signing_secret.exists());
+    keys::read_recipient_public_key(&recipient_public).expect("recipient public key must read");
+    keys::read_recipient_secret_key(&recipient_secret).expect("recipient secret key must read");
+    keys::read_signing_public_key(&signing_public).expect("signing public key must read");
+    keys::read_signing_secret_key(&signing_secret).expect("signing secret key must read");
+
+    let recipient_secret_json = json_value(&recipient_secret);
+    assert!(recipient_secret_json.get("created_at_unix").is_some());
+    assert!(recipient_secret_json.get("expires_at_unix").is_none());
+}
+
+#[cfg(feature = "pqc")]
+#[test]
+fn keygen_pair_cli_accepts_lifetime_days() {
+    let dir = tempdir().expect("tempdir must be created");
+
+    AssertCommand::cargo_bin("fcrypt")
+        .expect("binary must build")
+        .current_dir(dir.path())
+        .args(["keygen", "pair", "bob", "30"])
+        .assert()
+        .success();
+
+    let recipient_secret = dir.path().join("bob_recipient_default.sec");
+    let signing_secret = dir.path().join("bob_signer_mldsa87.sec");
+    keys::read_recipient_secret_key(&recipient_secret).expect("recipient secret key must read");
+    keys::read_signing_secret_key(&signing_secret).expect("signing secret key must read");
+
+    let recipient_secret_json = json_value(&recipient_secret);
+    let created_at = recipient_secret_json
+        .get("created_at_unix")
+        .and_then(|value| value.as_u64())
+        .expect("created_at_unix must be present");
+    let expires_at = recipient_secret_json
+        .get("expires_at_unix")
+        .and_then(|value| value.as_u64())
+        .expect("expires_at_unix must be present");
+    assert_eq!(expires_at - created_at, 30 * 86_400);
+}
+
+#[test]
+fn recipient_key_auto_discovery_is_bounded_before_parsing_keys() {
+    let dir = tempdir().expect("tempdir must be created");
+    for index in 0..=keys::MAX_AUTO_DISCOVERED_RECIPIENT_IDENTITIES {
+        let path = dir
+            .path()
+            .join(format!("{index:08x}_recipient_default.sec"));
+        fs::write(path, b"not json").expect("dummy key file must be written");
+    }
+
+    let err = keys::read_recipient_secret_keys(dir.path())
+        .expect_err("too many identities must be rejected before key parsing");
+
+    assert!(matches!(
+        err,
+        AppError::TooManyRecipientIdentities {
+            found,
+            limit
+        } if found == keys::MAX_AUTO_DISCOVERED_RECIPIENT_IDENTITIES + 1
+            && limit == keys::MAX_AUTO_DISCOVERED_RECIPIENT_IDENTITIES
+    ));
+}
+
+#[cfg(feature = "pqc")]
+#[test]
 fn asymmetric_roundtrip_with_generated_identity() {
     let dir = tempdir().expect("tempdir must be created");
     let input = dir.path().join("report.pdf");
@@ -337,7 +514,7 @@ fn asymmetric_roundtrip_with_generated_identity() {
     let outcome = asym::encrypt::encrypt_file(&encrypt_args, &test_config(64), |_| {})
         .expect("asymmetric encryption must succeed");
 
-    assert_eq!(outcome.output, dir.path().join("report.pdf.fe"));
+    assert_eq!(outcome.output, dir.path().join("report.pdf.bin"));
     assert_eq!(outcome.keys_dir, dir.path().join("report_keys"));
     let recipient_secret = outcome
         .generated_recipient_secret
@@ -349,10 +526,10 @@ fn asymmetric_roundtrip_with_generated_identity() {
     assert_key_name(&recipient_public, "_recipient_default.pub");
     assert_eq!(json_field(&recipient_secret, "mode"), "default");
     assert_eq!(json_field(&recipient_public, "mode"), "default");
-    assert_eq!(
-        &fs::read(&outcome.output).expect("encrypted output must be readable")[..8],
-        b"FCRYPTFE"
-    );
+    let encrypted_bytes = fs::read(&outcome.output).expect("encrypted output must be readable");
+    assert!(encrypted_bytes.len() > opaque::PRELUDE_LEN);
+    assert_ne!(&encrypted_bytes[..8], b"FCRYPTFE");
+    assert_ne!(&encrypted_bytes[..8], b"FCRYPTH1");
 
     let decrypt_args = AssymDecryptArgs {
         input: outcome.output,
@@ -372,7 +549,7 @@ fn asymmetric_roundtrip_with_generated_identity() {
 
 #[cfg(feature = "pqc")]
 #[test]
-fn asymmetric_roundtrip_with_embedded_signature_verification() {
+fn asymmetric_roundtrip_with_detached_signature_verification() {
     let dir = tempdir().expect("tempdir must be created");
     let input = dir.path().join("signed.bin");
     let decrypted = dir.path().join("signed.out");
@@ -399,8 +576,12 @@ fn asymmetric_roundtrip_with_embedded_signature_verification() {
     let signer_secret = outcome
         .generated_signer_secret
         .expect("signer secret must be generated");
+    let detached_signature = outcome
+        .detached_signature
+        .expect("detached signature path must be returned");
     assert_key_name(&signer_public, "_signer_mldsa87.pub");
     assert_key_name(&signer_secret, "_signer_mldsa87.sec");
+    assert!(detached_signature.exists());
 
     let decrypt_args = AssymDecryptArgs {
         input: outcome.output,
@@ -447,7 +628,7 @@ fn asymmetric_sign_creates_detached_signature() {
     };
     let sign_outcome = asym::sign::sign_file(&sign_args).expect("detached signing must succeed");
     assert!(!sign_outcome.embedded);
-    assert_eq!(sign_outcome.output, dir.path().join("detached.bin.fe.sig"));
+    assert_eq!(sign_outcome.output, dir.path().join("detached.bin.bin.sig"));
     assert!(sign_outcome.output.exists());
 }
 
@@ -512,14 +693,17 @@ fn assert_key_name(path: &Path, suffix: &str) {
 
 #[cfg(feature = "pqc")]
 fn json_field(path: &Path, field: &str) -> String {
-    let value: serde_json::Value =
-        serde_json::from_slice(&fs::read(path).expect("json key file must be readable"))
-            .expect("json key file must parse");
-    value
+    json_value(path)
         .get(field)
         .and_then(|value| value.as_str())
         .expect("json field must be a string")
         .to_string()
+}
+
+#[cfg(feature = "pqc")]
+fn json_value(path: &Path) -> serde_json::Value {
+    serde_json::from_slice(&fs::read(path).expect("json key file must be readable"))
+        .expect("json key file must parse")
 }
 
 #[test]
@@ -585,8 +769,8 @@ fn empty_file_roundtrip() {
         .len();
     assert_eq!(
         encrypted_len,
-        (FILE_PREFIX_LEN + TAG_LEN) as u64,
-        "empty file should contain binary prefix and authentication tag"
+        (opaque::PRELUDE_LEN + TAG_LEN) as u64,
+        "empty file should contain opaque prelude and authentication tag"
     );
 
     let decrypted_bytes = fs::read(&decrypted).expect("decrypted file must be readable");
@@ -594,122 +778,75 @@ fn empty_file_roundtrip() {
 }
 
 #[test]
-fn standard_encryption_keeps_legacy_prefix_format() {
+fn opaque_encryption_uses_fixed_prelude_without_legacy_magic() {
     let dir = tempdir().expect("tempdir must be created");
-    let input = dir.path().join("legacy-format.bin");
-    let encrypted = dir.path().join("legacy-format.bin.encdata");
+    let input = dir.path().join("opaque-format.bin");
+    let encrypted = dir.path().join("opaque-format.bin.encdata");
     let original = deterministic_bytes(96);
     fs::write(&input, &original).expect("input file must be written");
 
     let config = test_config(64);
-    encrypt_file(
-        &input,
-        &encrypted,
-        "standard-format",
-        &config,
-        false,
-        |_| {},
-    )
-    .expect("encryption must succeed");
+    encrypt_file(&input, &encrypted, "opaque-format", &config, false, |_| {})
+        .expect("encryption must succeed");
 
-    let encrypted_len = fs::metadata(&encrypted)
-        .expect("metadata must be readable")
-        .len();
+    let bytes = fs::read(&encrypted).expect("encrypted file must be readable");
     assert_eq!(
-        encrypted_len,
-        FILE_PREFIX_LEN as u64
+        bytes.len() as u64,
+        opaque::PRELUDE_LEN as u64
             + filecrypt::sym::crypto::expected_ciphertext_payload_len(
                 original.len() as u64,
                 config.chunk_size,
             )
             .expect("expected length must be calculated")
     );
+    assert_ne!(&bytes[..8], b"FCRYPTH1");
+    assert_ne!(&bytes[..8], b"FCRYPTFE");
 }
 
 #[test]
-fn paranoid_roundtrip_small_file() {
+fn opaque_roundtrip_small_file() {
     let dir = tempdir().expect("tempdir must be created");
-    let input = dir.path().join("paranoid.bin");
-    let encrypted = dir.path().join("paranoid.bin.encdata");
-    let decrypted = dir.path().join("paranoid.bin.decoded");
+    let input = dir.path().join("opaque.bin");
+    let encrypted = dir.path().join("opaque.bin.encdata");
+    let decrypted = dir.path().join("opaque.bin.decoded");
     let original = deterministic_bytes(150);
     fs::write(&input, &original).expect("input file must be written");
 
     let config = test_config(64);
-    encrypt_file_with_mode(
+    encrypt_file(
         &input,
         &encrypted,
-        "paranoid-password",
+        "opaque-password",
         &config,
-        CryptoMode::Paranoid,
         false,
         |_| {},
     )
-    .expect("paranoid encryption must succeed");
+    .expect("encryption must succeed");
     decrypt_file(
         &encrypted,
         &decrypted,
-        "paranoid-password",
+        "opaque-password",
         &config,
         false,
         |_| {},
     )
-    .expect("paranoid decryption must succeed");
+    .expect("decryption must succeed");
 
     let decrypted_bytes = fs::read(&decrypted).expect("decrypted file must be readable");
     assert_eq!(decrypted_bytes, original);
 }
 
 #[test]
-fn paranoid_header_records_mode_and_argon_params() {
+fn opaque_wrong_password_fails_without_finalized_output() {
     let dir = tempdir().expect("tempdir must be created");
-    let input = dir.path().join("paranoid-meta.bin");
-    let encrypted = dir.path().join("paranoid-meta.bin.encdata");
-    fs::write(&input, deterministic_bytes(20)).expect("input file must be written");
-
-    let config = test_config(64);
-    encrypt_file_with_mode(
-        &input,
-        &encrypted,
-        "metadata-password",
-        &config,
-        CryptoMode::Paranoid,
-        false,
-        |_| {},
-    )
-    .expect("paranoid encryption must succeed");
-
-    let bytes = fs::read(&encrypted).expect("encrypted file must be readable");
-    assert!(bytes.len() >= VERSIONED_HEADER_LEN);
-    assert_eq!(&bytes[..8], b"FCRYPTH1");
-    assert_eq!(bytes[8], 1);
-    assert_eq!(bytes[9] & PARANOID_FLAG, PARANOID_FLAG);
-    assert_eq!(u64::from_le_bytes(bytes[12..20].try_into().unwrap()), 64);
-    assert_eq!(u32::from_le_bytes(bytes[20..24].try_into().unwrap()), 8);
-    assert_eq!(u32::from_le_bytes(bytes[24..28].try_into().unwrap()), 1);
-    assert_eq!(u32::from_le_bytes(bytes[28..32].try_into().unwrap()), 1);
-    assert_eq!(u64::from_le_bytes(bytes[32..40].try_into().unwrap()), 20);
-}
-
-#[test]
-fn paranoid_wrong_password_fails_without_finalized_output() {
-    let dir = tempdir().expect("tempdir must be created");
-    let input = dir.path().join("paranoid-wrong.bin");
-    let encrypted = dir.path().join("paranoid-wrong.bin.encdata");
-    let decrypted = dir.path().join("paranoid-wrong.bin.decoded");
+    let input = dir.path().join("opaque-wrong.bin");
+    let encrypted = dir.path().join("opaque-wrong.bin.encdata");
+    let decrypted = dir.path().join("opaque-wrong.bin.decoded");
     fs::write(&input, deterministic_bytes(140)).expect("input file must be written");
 
     let config = test_config(64);
-    encrypt_file_with_mode(
-        &input,
-        &encrypted,
-        "right-password",
-        &config,
-        CryptoMode::Paranoid,
-        false,
-        |_| {},
-    )
-    .expect("paranoid encryption must succeed");
+    encrypt_file(&input, &encrypted, "right-password", &config, false, |_| {})
+        .expect("encryption must succeed");
 
     let err = decrypt_file(
         &encrypted,
@@ -719,7 +856,7 @@ fn paranoid_wrong_password_fails_without_finalized_output() {
         false,
         |_| {},
     )
-    .expect_err("paranoid decryption must fail");
+    .expect_err("decryption must fail");
     assert!(matches!(err, AppError::DecryptionFailed));
     assert!(
         !decrypted.exists(),
@@ -728,31 +865,23 @@ fn paranoid_wrong_password_fails_without_finalized_output() {
 }
 
 #[test]
-fn corrupted_paranoid_ciphertext_fails() {
+fn corrupted_opaque_payload_fails() {
     let dir = tempdir().expect("tempdir must be created");
-    let input = dir.path().join("paranoid-corrupt.bin");
-    let encrypted = dir.path().join("paranoid-corrupt.bin.encdata");
-    let decrypted = dir.path().join("paranoid-corrupt.bin.decoded");
+    let input = dir.path().join("opaque-corrupt.bin");
+    let encrypted = dir.path().join("opaque-corrupt.bin.encdata");
+    let decrypted = dir.path().join("opaque-corrupt.bin.decoded");
     fs::write(&input, deterministic_bytes(140)).expect("input file must be written");
 
     let config = test_config(64);
-    encrypt_file_with_mode(
-        &input,
-        &encrypted,
-        "password",
-        &config,
-        CryptoMode::Paranoid,
-        false,
-        |_| {},
-    )
-    .expect("paranoid encryption must succeed");
+    encrypt_file(&input, &encrypted, "password", &config, false, |_| {})
+        .expect("encryption must succeed");
 
     let mut bytes = fs::read(&encrypted).expect("encrypted file must be readable");
-    bytes[VERSIONED_HEADER_LEN] ^= 0x5A;
+    bytes[opaque::PRELUDE_LEN] ^= 0x5A;
     fs::write(&encrypted, bytes).expect("corrupted file must be written");
 
     let err = decrypt_file(&encrypted, &decrypted, "password", &config, false, |_| {})
-        .expect_err("paranoid decryption must fail");
+        .expect_err("decryption must fail");
     assert!(matches!(err, AppError::DecryptionFailed));
     assert!(
         !decrypted.exists(),
@@ -761,31 +890,23 @@ fn corrupted_paranoid_ciphertext_fails() {
 }
 
 #[test]
-fn truncated_paranoid_ciphertext_fails() {
+fn truncated_opaque_ciphertext_fails() {
     let dir = tempdir().expect("tempdir must be created");
-    let input = dir.path().join("paranoid-truncated.bin");
-    let encrypted = dir.path().join("paranoid-truncated.bin.encdata");
-    let decrypted = dir.path().join("paranoid-truncated.bin.decoded");
+    let input = dir.path().join("opaque-truncated.bin");
+    let encrypted = dir.path().join("opaque-truncated.bin.encdata");
+    let decrypted = dir.path().join("opaque-truncated.bin.decoded");
     fs::write(&input, deterministic_bytes(140)).expect("input file must be written");
 
     let config = test_config(64);
-    encrypt_file_with_mode(
-        &input,
-        &encrypted,
-        "password",
-        &config,
-        CryptoMode::Paranoid,
-        false,
-        |_| {},
-    )
-    .expect("paranoid encryption must succeed");
+    encrypt_file(&input, &encrypted, "password", &config, false, |_| {})
+        .expect("encryption must succeed");
 
     let mut bytes = fs::read(&encrypted).expect("encrypted file must be readable");
     bytes.truncate(bytes.len() - 1);
     fs::write(&encrypted, bytes).expect("truncated file must be written");
 
     let err = decrypt_file(&encrypted, &decrypted, "password", &config, false, |_| {})
-        .expect_err("paranoid decryption must fail");
+        .expect_err("decryption must fail");
     assert!(matches!(err, AppError::DecryptionFailed));
     assert!(
         !decrypted.exists(),
@@ -794,31 +915,23 @@ fn truncated_paranoid_ciphertext_fails() {
 }
 
 #[test]
-fn tampered_paranoid_metadata_fails() {
+fn tampered_opaque_prelude_fails() {
     let dir = tempdir().expect("tempdir must be created");
-    let input = dir.path().join("paranoid-metadata.bin");
-    let encrypted = dir.path().join("paranoid-metadata.bin.encdata");
-    let decrypted = dir.path().join("paranoid-metadata.bin.decoded");
+    let input = dir.path().join("opaque-metadata.bin");
+    let encrypted = dir.path().join("opaque-metadata.bin.encdata");
+    let decrypted = dir.path().join("opaque-metadata.bin.decoded");
     fs::write(&input, deterministic_bytes(140)).expect("input file must be written");
 
     let config = test_config(64);
-    encrypt_file_with_mode(
-        &input,
-        &encrypted,
-        "password",
-        &config,
-        CryptoMode::Paranoid,
-        false,
-        |_| {},
-    )
-    .expect("paranoid encryption must succeed");
+    encrypt_file(&input, &encrypted, "password", &config, false, |_| {})
+        .expect("encryption must succeed");
 
     let mut bytes = fs::read(&encrypted).expect("encrypted file must be readable");
-    bytes[32] ^= 0x01;
+    bytes[0] ^= 0x01;
     fs::write(&encrypted, bytes).expect("tampered file must be written");
 
     let err = decrypt_file(&encrypted, &decrypted, "password", &config, false, |_| {})
-        .expect_err("paranoid decryption must fail");
+        .expect_err("decryption must fail");
     assert!(matches!(err, AppError::DecryptionFailed));
     assert!(
         !decrypted.exists(),
@@ -868,8 +981,8 @@ fn corrupted_empty_file_tag_fails() {
         .expect("encryption must succeed");
 
     let mut bytes = fs::read(&encrypted).expect("encrypted file must be readable");
-    assert_eq!(bytes.len(), FILE_PREFIX_LEN + TAG_LEN);
-    bytes[FILE_PREFIX_LEN] ^= 0x5A;
+    assert_eq!(bytes.len(), opaque::PRELUDE_LEN + TAG_LEN);
+    bytes[opaque::PRELUDE_LEN] ^= 0x5A;
     fs::write(&encrypted, bytes).expect("corrupted file must be written");
 
     let err = decrypt_file(&encrypted, &decrypted, "empty-case", &config, false, |_| {})
@@ -883,7 +996,7 @@ fn corrupted_empty_file_tag_fails() {
 }
 
 #[test]
-fn legacy_empty_file_without_tag_still_decrypts() {
+fn legacy_empty_file_without_tag_is_rejected() {
     let dir = tempdir().expect("tempdir must be created");
     let encrypted = dir.path().join("legacy-empty.encdata");
     let decrypted = dir.path().join("legacy-empty.out");
@@ -895,7 +1008,7 @@ fn legacy_empty_file_without_tag_still_decrypts() {
     fs::write(&encrypted, legacy).expect("legacy encrypted file must be written");
 
     let config = test_config(512);
-    decrypt_file(
+    let err = decrypt_file(
         &encrypted,
         &decrypted,
         "any-password",
@@ -903,8 +1016,11 @@ fn legacy_empty_file_without_tag_still_decrypts() {
         false,
         |_| {},
     )
-    .expect("legacy empty file should remain supported");
+    .expect_err("legacy empty file should be rejected");
 
-    let decrypted_bytes = fs::read(&decrypted).expect("decrypted file must be readable");
-    assert!(decrypted_bytes.is_empty());
+    assert!(matches!(err, AppError::DecryptionFailed));
+    assert!(
+        !decrypted.exists(),
+        "decrypted output must not be finalized"
+    );
 }

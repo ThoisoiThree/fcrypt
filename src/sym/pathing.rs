@@ -9,7 +9,7 @@ pub fn encryption_output_path(input: &Path) -> Result<PathBuf> {
         .ok_or_else(|| AppError::MissingFileName(input.to_path_buf()))?;
 
     let mut encrypted_name: OsString = file_name.to_os_string();
-    encrypted_name.push(".fe");
+    encrypted_name.push(".bin");
     Ok(input.with_file_name(encrypted_name))
 }
 
@@ -19,7 +19,7 @@ pub fn decryption_output_path(input: &Path) -> Result<PathBuf> {
         .ok_or_else(|| AppError::MissingFileName(input.to_path_buf()))?;
     let file_name_string = file_name.to_string_lossy();
 
-    if let Some(stripped) = file_name_string.strip_suffix(".fe") {
+    if let Some(stripped) = file_name_string.strip_suffix(".bin") {
         if !stripped.is_empty() {
             return Ok(input.with_file_name(stripped));
         }
@@ -42,7 +42,7 @@ pub fn asym_encryption_output_path(input: &Path) -> Result<PathBuf> {
         .ok_or_else(|| AppError::MissingFileName(input.to_path_buf()))?;
 
     let mut encrypted_name: OsString = file_name.to_os_string();
-    encrypted_name.push(".fe");
+    encrypted_name.push(".bin");
     Ok(input.with_file_name(encrypted_name))
 }
 
@@ -52,7 +52,7 @@ pub fn asym_decryption_output_path(input: &Path) -> Result<PathBuf> {
         .ok_or_else(|| AppError::MissingFileName(input.to_path_buf()))?;
     let file_name_string = file_name.to_string_lossy();
 
-    if let Some(stripped) = file_name_string.strip_suffix(".fe") {
+    if let Some(stripped) = file_name_string.strip_suffix(".bin") {
         if !stripped.is_empty() {
             return Ok(input.with_file_name(stripped));
         }
@@ -67,7 +67,7 @@ pub fn asym_default_keys_dir_for_plain_input(input: &Path) -> Result<PathBuf> {
     default_keys_dir(input)
 }
 
-pub fn asym_default_keys_dir_for_fe_input(input: &Path) -> Result<PathBuf> {
+pub fn asym_default_keys_dir_for_encrypted_input(input: &Path) -> Result<PathBuf> {
     let logical_input = asym_decryption_output_path(input)?;
     default_keys_dir(&logical_input)
 }

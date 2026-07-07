@@ -5,37 +5,39 @@ pub fn print_help_all() {
 pub const HELP_ALL: &str = r#"fcrypt full help
 
 1. Purpose of fcrypt
-  fcrypt encrypts and decrypts local files. The password-based symmetric mode
-  is unchanged, and the asymmetric post-quantum mode writes versioned .fe
-  envelopes.
+  fcrypt encrypts and decrypts local files. Both password-based and
+  asymmetric PQC encryption use the opaque container format.
 
 2. Modes
   Symmetric mode:
     fcrypt encrypt <INPUT>
     fcrypt decrypt <INPUT>
 
-  Asymmetric PQC .fe mode:
+  Asymmetric PQC opaque mode:
     fcrypt asym encrypt <INPUT>
-    fcrypt asym decrypt <INPUT.fe>
-    fcrypt asym sign <INPUT.fe>
+    fcrypt asym decrypt <INPUT.bin>
+    fcrypt asym sign <INPUT.bin>
 
 3. Symmetric Mode
   encrypt and encode are aliases.
   decrypt and decode are aliases.
-  The symmetric file format and password prompts are not changed.
-  Symmetric encryption writes <INPUT>.fe by default.
+  Symmetric encryption writes <INPUT>.bin by default.
+  There is no separate format flag.
 
-4. Asymmetric PQC .fe Mode
+4. Asymmetric PQC Opaque Mode
   asym and assym are aliases. Help shows asym as the primary spelling.
-  The mode always creates .fe files and uses:
+  The mode always creates opaque .bin files and uses:
     KEM 1: ML-KEM-1024
     KEM 2: HQC-256
     KDF: HKDF-SHA3-512
     AEAD: AES-256-GCM
-    Signature: ML-DSA-87
+    Signature: detached ML-DSA-87
     Hash: SHA3 family
 
 5. Commands And Aliases
+  fcrypt -ha
+  fcrypt --help-all
+
   fcrypt encrypt <INPUT> [OPTIONS]
   fcrypt encode  <INPUT> [OPTIONS]
   fcrypt decrypt <INPUT> [OPTIONS]
@@ -43,20 +45,20 @@ pub const HELP_ALL: &str = r#"fcrypt full help
 
   fcrypt keygen <N>
   fcrypt keygen phrase <N> [OPTIONS]
+  fcrypt keygen pair <NAME> [LIFETIME_DAYS]
 
   fcrypt asym encrypt <INPUT> [OPTIONS]
   fcrypt asym encode  <INPUT> [OPTIONS]
-  fcrypt asym decrypt <INPUT.fe> [OPTIONS]
-  fcrypt asym decode  <INPUT.fe> [OPTIONS]
-  fcrypt asym sign    <INPUT.fe> [OPTIONS]
+  fcrypt asym decrypt <INPUT.bin> [OPTIONS]
+  fcrypt asym decode  <INPUT.bin> [OPTIONS]
+  fcrypt asym sign    <INPUT.bin> [OPTIONS]
 
   fcrypt assym is accepted anywhere fcrypt asym is accepted.
+  -ha / --help-all is accepted from any command position and prints this page.
 
 6. Symmetric Options
   <INPUT>, -i, --input <FILE>
       Path to the input file.
-  -p, --paranoic, --paranoid
-      Use the higher-resource cascade mode.
   -f, --force
       Allow overwriting the output file.
 
@@ -67,10 +69,17 @@ pub const HELP_ALL: &str = r#"fcrypt full help
       Generate a random phrase with N words from the embedded EFF large wordlist.
   -sep, -s, --sep <SEP>
       Word separator for phrase generation. Defaults to '-'.
+  fcrypt keygen pair <NAME> [LIFETIME_DAYS]
+      Generate four asymmetric key files in the current directory:
+      <NAME>_recipient_default.pub
+      <NAME>_recipient_default.sec
+      <NAME>_signer_mldsa87.pub
+      <NAME>_signer_mldsa87.sec
+      Keys do not expire unless LIFETIME_DAYS is provided.
 
 8. asym encrypt / encode Options
   -o, --output <FILE>
-      Destination file. Defaults to <INPUT>.fe.
+      Destination file. Defaults to <INPUT>.bin.
   -r, --recipient-public <FILE>
       Recipient public key bundle. If omitted, fcrypt generates a new
       recipient keypair automatically.
@@ -78,48 +87,44 @@ pub const HELP_ALL: &str = r#"fcrypt full help
       Directory for generated or discovered keys. Defaults to
       <file_stem>_keys, for example report_keys/.
   -s, --sign
-      Sign the result with ML-DSA-87.
+      Create a detached ML-DSA-87 signature next to the encrypted file.
   -S, --sign-key <FILE>
-      Signing secret key. This automatically enables signing.
+      Signing secret key. This automatically enables detached signing.
   -f, --force
-      Allow overwriting the output file.
+      Allow overwriting the output file and detached signature.
 
 9. asym decrypt / decode Options
   -o, --output <FILE>
-      Destination plaintext file. Defaults to <INPUT.fe without .fe>.
+      Destination plaintext file. Defaults to <INPUT.bin without .bin>.
   -i, --identity <FILE>
       Recipient secret key bundle used for decryption.
   -k, --keys-dir <DIR>
-      Directory for auto-discovering recipient secret keys.
+      Directory for auto-discovering recipient secret keys. Auto-discovery
+      tries at most 32 matching recipient secret keys; use -i to select one.
   -v, --verify <FILE>
-      Signing public key used to verify a signature.
+      Signing public key used to verify a detached signature.
   -R, --require-signature
-      Require a valid signature. If no signature is present or verification
-      cannot be completed, decryption fails.
+      Require a valid detached signature before decrypting.
   -f, --force
       Allow overwriting the output file.
 
 10. asym sign Options
   -o, --output <FILE>
-      Detached signature output. Defaults to <INPUT.fe>.sig unless --embed is set.
+      Detached signature output. Defaults to <INPUT.bin>.sig.
   -S, --sign-key <FILE>
       Signing secret key. If omitted, fcrypt generates a new signing keypair.
   -k, --keys-dir <DIR>
       Directory for generated signing keys. Defaults to <file_stem>_keys.
   -e, --embed
-      Embed the signature into the .fe envelope.
+      Unsupported for opaque files.
   -f, --force
-      Allow overwriting the output file.
+      Allow overwriting the signature file.
 
 11. Output File Format
-  Both modes use .fe as the default filename extension.
-  Symmetric mode keeps its existing binary format.
-  Asymmetric mode writes a self-describing envelope:
-    magic: FCRYPTFE
-    version: 1
-    header length
-    CBOR header
-    AES-256-GCM encrypted chunks
+  Both modes use .bin as the default filename extension.
+  The encrypted file has no magic bytes, cleartext version, cleartext
+  algorithm identifiers, key id, or media mimicry.
+  Format metadata is authenticated and encrypted inside an opaque prelude.
 
 12. Where Keys Are Stored
   If -r/--recipient-public is not specified, recipient keys are generated
@@ -129,28 +134,31 @@ pub const HELP_ALL: &str = r#"fcrypt full help
   that directory directly and does not create a nested report_keys/ directory.
 
 13. Recipient Key vs Signing Key
-  recipient_default.sec is needed to decrypt matching .fe files.
+  recipient_default.sec is needed to decrypt matching opaque files.
   signer_mldsa87.sec is needed to create signatures.
   signer_mldsa87.pub is used with -v/--verify.
   -i/--identity selects a recipient secret key for decryption.
+  keygen pair creates both recipient and signing keypairs at once.
 
 14. Examples
   Symmetric:
     fcrypt encrypt notes.txt
     fcrypt encode notes.txt
-    fcrypt decrypt notes.txt.fe
-    fcrypt decode notes.txt.fe
+    fcrypt decrypt notes.txt.bin
+    fcrypt decode notes.txt.bin
 
   Keygen:
     fcrypt keygen 32
     fcrypt keygen phrase 6
     fcrypt keygen phrase 6 -sep .
+    fcrypt keygen pair alice
+    fcrypt keygen pair alice 365
 
   Asymmetric with auto-generated keys:
     fcrypt asym encrypt report.pdf
 
   Creates:
-    report.pdf.fe
+    report.pdf.bin
     report_keys/
       <label8>_recipient_default.pub
       <label8>_recipient_default.sec
@@ -162,30 +170,27 @@ pub const HELP_ALL: &str = r#"fcrypt full help
     fcrypt asym encrypt report.pdf -r ./alice_recipient.pub
 
   Decrypt:
-    fcrypt asym decrypt report.pdf.fe -i ./report_keys/a13f2c9b_recipient_default.sec
+    fcrypt asym decrypt report.pdf.bin -i ./report_keys/a13f2c9b_recipient_default.sec
 
   Alias:
-    fcrypt asym decode report.pdf.fe -i ./report_keys/a13f2c9b_recipient_default.sec
+    fcrypt asym decode report.pdf.bin -i ./report_keys/a13f2c9b_recipient_default.sec
 
-  Encrypt and sign with generated signing key:
+  Encrypt and create a detached signature:
     fcrypt asym encrypt report.pdf -s
 
   Encrypt and sign with existing signing key:
     fcrypt asym encrypt report.pdf -S ./sender_signer.sec
 
   Detached signing:
-    fcrypt asym sign report.pdf.fe
-
-  Embedded signing:
-    fcrypt asym sign report.pdf.fe -e
+    fcrypt asym sign report.pdf.bin
 
   Decrypt and verify:
-    fcrypt asym decrypt report.pdf.fe \
+    fcrypt asym decrypt report.pdf.bin \
       -i ./report_keys/a13f2c9b_recipient_default.sec \
       -v ./sender_signer.pub
 
   Require signature:
-    fcrypt asym decrypt report.pdf.fe \
+    fcrypt asym decrypt report.pdf.bin \
       -i ./report_keys/a13f2c9b_recipient_default.sec \
       -v ./sender_signer.pub \
       -R
@@ -198,25 +203,19 @@ pub const HELP_ALL: &str = r#"fcrypt full help
   signer_mldsa87.sec can create signatures but cannot decrypt files.
 
   Move .sec files to a safe location after encryption if needed.
-  Anyone with recipient_default.sec can decrypt matching .fe files.
+  The file does not reveal which recipient key should be tried.
   Anyone with signer_mldsa87.sec can sign files as that signer.
 
   keygen phrase uses the embedded EFF large wordlist and cryptographically
   random word selection.
 
 16. Troubleshooting
-  If symmetric decrypt is used on an asymmetric .fe file:
-    This file uses asymmetric .fe format.
-    Use: fcrypt asym decrypt report.pdf.fe -i <recipient_default.sec>
-
-  If asym decrypt is used on a symmetric-mode file:
-    This file does not look like an asymmetric .fe file.
-    Use the symmetric command if this is a password-encrypted file:
-      fcrypt decrypt old.fcrypt
-
   If no identity key is found:
     No matching recipient secret key found.
-    Use: fcrypt asym decrypt <file.fe> -i <recipient_default.sec>
+    Use: fcrypt asym decrypt <file.bin> -i <recipient_default.sec>
+
+  If signature verification is requested:
+    The detached signature must be next to the encrypted file as <file>.sig.
 "#;
 
 const SECTION_COLOR: &str = "\x1b[38;2;9;230;189m";
