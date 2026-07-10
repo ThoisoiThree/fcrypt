@@ -9,10 +9,11 @@ The crate name is `filecrypt`; the installed binary is `fcrypt`.
 chunks, writes outputs through temporary files, and finalizes results only after
 the operation succeeds.
 
-## Release 0.3.0 compatibility notice
+## Release 0.3.x compatibility notice
 
-Version `0.3.0` switches encrypted files to the opaque `.bin` container format.
-It does **not** provide backward compatibility for pre-0.3.0 encrypted files.
+Version `0.3.0` introduced the opaque `.bin` container format, retained by the
+`0.3.x` releases. It does **not** provide backward compatibility for pre-0.3.0
+encrypted files.
 
 To read old files created by `fcrypt` `0.2.0` or earlier, use `fcrypt` version
 `0.2.0`.
@@ -27,9 +28,9 @@ To read old files created by `fcrypt` `0.2.0` or earlier, use `fcrypt` version
   slots.
 - AES-256-GCM streaming payload encryption with `u64` chunk indexes.
 - Detached ML-DSA-87 signatures for opaque ciphertext files.
-- Automatic recipient key generation when no recipient public key is provided.
-- `keygen pair <name> [lifetime_days]` for generating recipient and signing key
-  pairs together.
+- Explicit identity creation with `identity create <name>` for recipient and
+  signing key pairs. The legacy `asym encrypt` workflow retains its historical
+  automatic key generation behavior.
 - Random password generation and Diceware-style passphrase generation from the
   embedded EFF large wordlist.
 - Atomic output workflow: plaintext, ciphertext, signature, and key files are
@@ -149,55 +150,47 @@ Short command-local help:
 fcrypt -h
 fcrypt encrypt -h
 fcrypt decrypt -h
-fcrypt asym -h
-fcrypt asym encrypt -h
-fcrypt asym decrypt -h
-fcrypt asym sign -h
-fcrypt keygen -h
-fcrypt keygen phrase -h
-fcrypt keygen pair -h
+fcrypt identity -h
+fcrypt sign -h
+fcrypt verify -h
 ```
 
 Full help for every command, option, alias, and example:
 
 ```bash
-fcrypt -ha
-fcrypt --help-all
+fcrypt help-all
 ```
 
-`-ha` / `--help-all` is accepted from subcommands too, for example:
+The compatibility forms `-ha` and `--help-all` are also accepted. They are
+handled before command parsing, except after `--`, so a file literally named
+`-ha` remains a valid input path.
 
 ```bash
-fcrypt asym encrypt -ha
+fcrypt --help-all
 ```
 
 ## Command overview
 
 ```bash
-# Password mode
-fcrypt encrypt <INPUT> [OPTIONS]
-fcrypt encode  <INPUT> [OPTIONS]
-fcrypt decrypt <INPUT> [OPTIONS]
-fcrypt decode  <INPUT> [OPTIONS]
+# Recommended commands
+fcrypt encrypt <INPUT> [-o <OUTPUT>]
+fcrypt decrypt <INPUT.bin> [-o <OUTPUT>]
+fcrypt sign <INPUT.bin> --key <SIGNER.SEC>
+fcrypt verify <INPUT.bin> --key <SIGNER.PUB>
+fcrypt identity create <NAME>
+fcrypt identity list
+fcrypt identity inspect <KEY>
+fcrypt password generate --length <N>
+fcrypt phrase generate --words <N>
 
-# Asymmetric PQC opaque mode
-fcrypt asym encrypt <INPUT> [OPTIONS]
-fcrypt asym encode  <INPUT> [OPTIONS]
-fcrypt asym decrypt <INPUT.bin> [OPTIONS]
-fcrypt asym decode  <INPUT.bin> [OPTIONS]
-fcrypt asym sign    <INPUT.bin> [OPTIONS]
-
-# Alias
-fcrypt assym ...    # accepted alias for fcrypt asym ...
-
-# Key generation
-fcrypt keygen <N>
-fcrypt keygen phrase <N> [OPTIONS]
-fcrypt keygen pair <NAME> [LIFETIME_DAYS]
+# Compatibility commands
+fcrypt asym ...
+fcrypt assym ...
+fcrypt keygen ...
 ```
 
-`encrypt` and `encode` are aliases. `decrypt` and `decode` are aliases. `asym`
-and `assym` are aliases.
+`encrypt` and `encode` are aliases. `decrypt` and `decode` are aliases. The
+legacy `asym`, `assym`, and `keygen` command groups remain supported.
 
 ## Password-based usage
 
@@ -237,33 +230,49 @@ Force overwrite of an existing output file:
 fcrypt decrypt report.pdf.bin --force
 ```
 
+Choose a specific output path:
+
+```bash
+fcrypt encrypt report.pdf --output archive.bin
+fcrypt decrypt archive.bin --output report-restored.pdf
+```
+
+For automation, read a password from a protected file. A single trailing LF or
+CRLF is removed; other whitespace remains part of the password:
+
+```bash
+fcrypt encrypt report.pdf --password-file ./fcrypt-password.txt --json
+fcrypt decrypt report.pdf.bin --password-file ./fcrypt-password.txt --quiet
+```
+
+`--json` emits one machine-readable result to stdout. `--quiet` suppresses
+normal success messages and progress, while `--no-progress` keeps final output
+but hides progress indicators. Passwords must never be supplied as command-line
+arguments.
+
 ## Asymmetric PQC opaque usage
 
-### Encrypt with automatically generated recipient keys
+### Recommended recipient-key workflow
 
 ```bash
-fcrypt asym encrypt report.pdf
+fcrypt identity create alice
+fcrypt encrypt report.pdf --recipient ./alice_recipient_default.pub
 ```
 
-Equivalent aliases:
+The unified command never creates a recipient key silently. Use
+`--new-identity <NAME>` when intentional one-off identity creation is desired.
+Back up the generated recipient `.sec` file: without it, encrypted data cannot
+be recovered.
+
+Sign and verify ciphertexts without decrypting:
 
 ```bash
-fcrypt asym encode report.pdf
-fcrypt assym encrypt report.pdf
-fcrypt assym encode report.pdf
+fcrypt sign report.pdf.bin --key ./alice_signer_mldsa87.sec
+fcrypt verify report.pdf.bin --key ./alice_signer_mldsa87.pub
+fcrypt decrypt report.pdf.bin \
+  --identity ./alice_recipient_default.sec \
+  --verify ./alice_signer_mldsa87.pub
 ```
-
-Output:
-
-```text
-report.pdf.bin
-report_keys/
-  <label8>_recipient_default.pub
-  <label8>_recipient_default.sec
-```
-
-Move the `.sec` file to a safe location if the encrypted file may be shared or
-archived with the folder.
 
 ### Generate named recipient and signing keys
 
@@ -416,8 +425,9 @@ fcrypt asym decrypt report.pdf.bin \
   -R
 ```
 
-If `-R` / `--require-signature` is used and no valid detached signature is
-available next to the ciphertext, decryption fails.
+When `--verify <signer.pub>` is used, a valid detached signature is required
+before decryption. The legacy `-R` / `--require-signature` option remains
+accepted for compatibility and still requires a verification key.
 
 ## Options
 
@@ -472,10 +482,10 @@ available next to the ciphertext, decryption fails.
 ### Random password
 
 ```bash
-fcrypt keygen 32
+fcrypt password generate --length 32
 ```
 
-`keygen <N>` writes a random password with `N` characters to stdout followed by
+`password generate` writes a random password with `N` characters to stdout followed by
 a newline. `N` must be between 1 and 4096.
 
 The password generator uses the operating system CSPRNG and this portable
@@ -490,15 +500,15 @@ A-Z a-z 0-9 ! # $ % & ( ) * + , - . / : ; < = > ? @ [ ] ^ _ { | } ~
 Generate a phrase from the embedded EFF large wordlist:
 
 ```bash
-fcrypt keygen phrase 7
+fcrypt phrase generate --words 7
 ```
 
 Use a custom separator:
 
 ```bash
-fcrypt keygen phrase 7 -sep .
-fcrypt keygen phrase 7 --sep _
-fcrypt keygen phrase 7 -s " "
+fcrypt phrase generate --words 7 --separator .
+fcrypt phrase generate --words 7 --separator _
+fcrypt phrase generate --words 7 --separator " "
 ```
 
 `keygen phrase` uses the embedded EFF large wordlist with 7,776 words. Word
@@ -508,11 +518,11 @@ selection is cryptographically random and uniform. The default separator is
 ### Named asymmetric key pairs
 
 ```bash
-fcrypt keygen pair alice
-fcrypt keygen pair alice 365
+fcrypt identity create alice
+fcrypt identity create alice --lifetime-days 365
 ```
 
-`keygen pair` writes one recipient keypair and one signing keypair. The optional
+`identity create` writes one recipient keypair and one signing keypair. The optional
 lifetime is in days. The key filename prefix accepts ASCII letters, digits,
 `.`, `_`, and `-`, and must not start with `.`.
 
@@ -572,7 +582,7 @@ Legacy `.enc` suffixes are accepted only for output-path mapping:
 old-file.enc -> old-file
 ```
 
-They do not imply legacy file format support in `0.3.0`.
+They do not imply legacy file format support in `0.3.x`.
 
 If the input has neither `.bin` nor `.enc`, decryption appends `.dec`:
 
@@ -633,12 +643,13 @@ The test suite covers:
 - explicit recipient public key encryption and secret key decryption;
 - bounded recipient key auto-discovery;
 - detached ML-DSA-87 signatures;
+- standalone signature verification and unified password/PQC CLI workflows;
 - required signature failures;
 - named `keygen pair` generation with and without lifetime;
 - output naming rules;
 - overwrite behavior;
 - random password and EFF wordlist passphrase generation;
-- `-ha` / `--help-all` output.
+- `help-all` and compatibility `-ha` / `--help-all` output.
 
 ## Security notes
 
@@ -646,11 +657,14 @@ The test suite covers:
 - Share only `.pub` files.
 - A recipient `.sec` key can decrypt matching opaque files.
 - A signer `.sec` key can create signatures as that signer.
-- Use `-R` / `--require-signature` when authenticity is mandatory.
+- Use `--verify <signer.pub>` when authenticity is mandatory during decryption.
+- Expired recipient secret keys remain usable for archival decryption, and
+  expired signing public keys remain usable for historical verification. Expired
+  recipient public keys and signing secret keys cannot be used for new work.
 - Keep backups of recipient secret keys; losing the matching recipient `.sec`
   key makes recovery impossible.
 - Password-based files cannot be recovered without the original password.
-- `fcrypt` `0.3.0` cannot read pre-0.3.0 encrypted files. Use version `0.2.0`
+- `fcrypt` `0.3.x` cannot read pre-0.3.0 encrypted files. Use version `0.2.0`
   for those files.
 
 ## License

@@ -1,4 +1,4 @@
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
 use crate::error::{AppError, Result};
@@ -17,18 +17,9 @@ pub fn decryption_output_path(input: &Path) -> Result<PathBuf> {
     let file_name = input
         .file_name()
         .ok_or_else(|| AppError::MissingFileName(input.to_path_buf()))?;
-    let file_name_string = file_name.to_string_lossy();
 
-    if let Some(stripped) = file_name_string.strip_suffix(".bin") {
-        if !stripped.is_empty() {
-            return Ok(input.with_file_name(stripped));
-        }
-    }
-
-    if let Some(stripped) = file_name_string.strip_suffix(".enc") {
-        if !stripped.is_empty() {
-            return Ok(input.with_file_name(stripped));
-        }
+    if has_extension(input, "bin") || has_extension(input, "enc") {
+        return Ok(input.with_extension(""));
     }
 
     let mut decrypted_name: OsString = file_name.to_os_string();
@@ -50,12 +41,9 @@ pub fn asym_decryption_output_path(input: &Path) -> Result<PathBuf> {
     let file_name = input
         .file_name()
         .ok_or_else(|| AppError::MissingFileName(input.to_path_buf()))?;
-    let file_name_string = file_name.to_string_lossy();
 
-    if let Some(stripped) = file_name_string.strip_suffix(".bin") {
-        if !stripped.is_empty() {
-            return Ok(input.with_file_name(stripped));
-        }
+    if has_extension(input, "bin") {
+        return Ok(input.with_extension(""));
     }
 
     let mut decrypted_name: OsString = file_name.to_os_string();
@@ -80,4 +68,9 @@ fn default_keys_dir(input: &Path) -> Result<PathBuf> {
     let mut dir_name = file_stem.to_os_string();
     dir_name.push("_keys");
     Ok(input.with_file_name(dir_name))
+}
+
+fn has_extension(path: &Path, extension: &str) -> bool {
+    path.extension()
+        .is_some_and(|value| value == OsStr::new(extension))
 }

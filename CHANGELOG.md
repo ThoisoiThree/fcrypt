@@ -7,6 +7,30 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-07-10
+
+### Added
+- Added unified `encrypt` and `decrypt` commands that select password or recipient-key mode from the supplied credentials.
+- Added top-level `identity`, `sign`, `verify`, `password`, and `phrase` commands.
+- Added non-interactive password input through `--password-file`, plus `--json`, `--quiet`, and `--no-progress` output controls.
+- Added integration coverage for the unified CLI, password files, identity inspection, JSON redaction, and keyset rollback.
+
+### Changed
+- Updated the CLI help and README for the new command layout while retaining legacy asymmetric command aliases.
+- Updated npm metadata and all platform package dependencies to `0.3.1`.
+
+### Fixed
+- Prevented mandatory detached-signature verification from being bypassed by replacing the ciphertext path between verification and decryption.
+- Prevented key generation from changing permissions on an existing user directory.
+- Allowed expired recipient secret keys to decrypt historical files and expired signing public keys to verify historical signatures; expired public/secret keys remain blocked for new encryption/signing respectively.
+- Made named keyset generation preflight all paths and restore previously published files if a forced commit fails.
+- Preserved non-UTF-8 file names when deriving decrypt output paths.
+- Made automatic recipient-key discovery skip malformed secret-key files when valid identities remain.
+- Rejected empty passwords at the password-encryption API boundary.
+
+### Security
+- Redacted secret-key debug output and zeroized decoded secret-key material and intermediate shared secrets where supported.
+
 ## [0.3.0] - 2026-07-07
 
 ### Added
@@ -72,7 +96,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Safe temp-file output workflow (finalize only after successful operation).
 - Integration tests for roundtrip, edge cases, corruption/truncation, and naming logic.
 
-[Unreleased]: https://github.com/ThoisoiThree/fcrypt/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/ThoisoiThree/fcrypt/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/ThoisoiThree/fcrypt/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/ThoisoiThree/fcrypt/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/ThoisoiThree/fcrypt/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/ThoisoiThree/fcrypt/compare/v0.1.1...v0.1.2

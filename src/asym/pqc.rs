@@ -1,4 +1,5 @@
 use crate::error::{AppError, Result};
+use zeroize::Zeroize;
 
 pub struct RecipientKeypair {
     pub mlkem1024_public: Vec<u8>,
@@ -17,6 +18,26 @@ pub struct EncapsulatedSecrets {
 pub struct SigningKeypair {
     pub mldsa87_public: Vec<u8>,
     pub mldsa87_secret: Vec<u8>,
+}
+
+impl Drop for RecipientKeypair {
+    fn drop(&mut self) {
+        self.mlkem1024_secret.zeroize();
+        self.hqc256_secret.zeroize();
+    }
+}
+
+impl Drop for EncapsulatedSecrets {
+    fn drop(&mut self) {
+        self.mlkem1024_shared_secret.zeroize();
+        self.hqc256_shared_secret.zeroize();
+    }
+}
+
+impl Drop for SigningKeypair {
+    fn drop(&mut self) {
+        self.mldsa87_secret.zeroize();
+    }
 }
 
 #[cfg(feature = "pqc")]

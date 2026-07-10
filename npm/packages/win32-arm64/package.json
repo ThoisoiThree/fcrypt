@@ -1,6 +1,6 @@
 {
   "name": "@thoisoithree/fcrypt-win32-arm64",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Prebuilt fcrypt binary for Windows arm64",
   "license": "MIT",
   "repository": {

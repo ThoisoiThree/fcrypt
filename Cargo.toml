@@ -1,11 +1,14 @@
 [package]
 name = "filecrypt"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 rust-version = "1.74"
 description = "Cross-platform CLI for password-based file encryption and decryption"
 license = "MIT"
 readme = "README.md"
+repository = "https://github.com/ThoisoiThree/fcrypt"
+homepage = "https://github.com/ThoisoiThree/fcrypt"
+documentation = "https://docs.rs/filecrypt"
 keywords = ["encryption", "cli", "aes-gcm", "argon2", "security"]
 categories = ["command-line-utilities", "cryptography"]
 autobins = false
@@ -22,7 +25,6 @@ path = "src/main.rs"
 aes-gcm = "0.10.3"
 argon2 = "0.5.3"
 clap = { version = "4.5.38", features = ["derive"] }
-eax = "0.5.0"
 indicatif = "0.18.4"
 base64 = "0.22"
 ciborium = "0.2"
@@ -34,7 +36,6 @@ rpassword = "7.5.1"
 serde = { version = "1", features = ["derive"] }
 serde_bytes = "0.11"
 serde_json = "1"
-serpent = "0.5.1"
 sha3 = "0.10"
 tempfile = "3.13.0"
 thiserror = "1.0.64"

@@ -1,6 +1,11 @@
 use std::cell::Cell;
 use std::fs;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::{
+    ffi::OsString,
+    os::unix::ffi::{OsStrExt, OsStringExt},
+};
 
 use assert_cmd::Command as AssertCommand;
 use clap::Parser;
@@ -120,6 +125,19 @@ fn opaque_password_encrypt_uses_fixed_argon_profile_without_decrypt_config() {
     .expect("opaque password decryption must use the fixed v1 Argon profile");
 
     assert_eq!(decrypted, original);
+}
+
+#[test]
+fn opaque_password_encryption_rejects_empty_password_before_writing() {
+    let config = test_config(64);
+    let mut reader = std::io::empty();
+    let mut encrypted = Vec::new();
+
+    let err = opaque::encrypt_password_stream(&mut reader, &mut encrypted, 0, "", &config, |_| {})
+        .expect_err("empty passwords must be rejected by the public API");
+
+    assert!(matches!(err, AppError::EmptyPassword));
+    assert!(encrypted.is_empty(), "no prelude may be written");
 }
 
 #[test]
@@ -324,6 +342,30 @@ fn asymmetric_path_mapping_behavior() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn decryption_output_paths_preserve_non_utf8_file_names() {
+    let password_input = PathBuf::from(OsString::from_vec(b"report-\xff.bin".to_vec()));
+    let password_output = decryption_output_path(&password_input).expect("path must resolve");
+    assert_eq!(
+        password_output
+            .file_name()
+            .expect("output must have a file name")
+            .as_bytes(),
+        b"report-\xff"
+    );
+
+    let asym_input = PathBuf::from(OsString::from_vec(b"archive-\xff.bin".to_vec()));
+    let asym_output = asym_decryption_output_path(&asym_input).expect("path must resolve");
+    assert_eq!(
+        asym_output
+            .file_name()
+            .expect("output must have a file name")
+            .as_bytes(),
+        b"archive-\xff"
+    );
+}
+
 #[test]
 fn cli_aliases_parse_to_same_commands() {
     let encrypt = Cli::parse_from(["fcrypt", "encrypt", "notes.txt"]);
@@ -340,16 +382,33 @@ fn cli_aliases_parse_to_same_commands() {
     let assym = Cli::parse_from(["fcrypt", "assym", "encode", "notes.txt"]);
     assert!(matches!(
         asym.command,
-        CliCommand::Assym {
+        CliCommand::Asym {
             command: AssymCommand::Encrypt(_)
         }
     ));
     assert!(matches!(
         assym.command,
-        CliCommand::Assym {
+        CliCommand::Asym {
             command: AssymCommand::Encrypt(_)
         }
     ));
+}
+
+#[test]
+fn unified_cli_selects_password_or_pqc_from_credentials() {
+    let password = Cli::parse_from(["fcrypt", "encrypt", "notes.txt"]);
+    let recipient = Cli::parse_from(["fcrypt", "encrypt", "notes.txt", "--recipient", "alice.pub"]);
+    let identity = Cli::parse_from([
+        "fcrypt",
+        "decrypt",
+        "notes.txt.bin",
+        "--identity",
+        "alice.sec",
+    ]);
+
+    assert!(matches!(password.command, CliCommand::Encrypt(ref args) if !args.uses_pqc()));
+    assert!(matches!(recipient.command, CliCommand::Encrypt(ref args) if args.uses_pqc()));
+    assert!(matches!(identity.command, CliCommand::Decrypt(ref args) if args.uses_pqc()));
 }
 
 #[test]
@@ -365,9 +424,9 @@ fn help_all_forms_exit_successfully() {
             .args(args)
             .assert()
             .success()
-            .stdout(contains("Asymmetric PQC Opaque Mode"))
-            .stdout(contains("encrypt and encode are aliases"))
-            .stdout(contains("asym and assym are aliases"));
+            .stdout(contains("fcrypt command reference"))
+            .stdout(contains("fcrypt identity create alice"))
+            .stdout(contains("Compatibility commands remain available"));
     }
 }
 
@@ -378,7 +437,257 @@ fn short_help_mentions_help_all_alias() {
         .arg("-h")
         .assert()
         .success()
-        .stdout(contains("-ha, --help-all"));
+        .stdout(contains("fcrypt help-all"));
+}
+
+#[test]
+fn password_file_preserves_spaces_and_removes_one_line_ending() {
+    let dir = tempdir().expect("tempdir must be created");
+    let unix = dir.path().join("unix-password");
+    let windows = dir.path().join("windows-password");
+    fs::write(&unix, b"  spaced password  \n").expect("password file must be written");
+    fs::write(&windows, b"  spaced password  \r\n").expect("password file must be written");
+
+    let unix_password =
+        filecrypt::sym::password_file::read_password_file(&unix).expect("password file must read");
+    let windows_password = filecrypt::sym::password_file::read_password_file(&windows)
+        .expect("password file must read");
+    assert_eq!(unix_password.password.as_str(), "  spaced password  ");
+    assert_eq!(windows_password.password.as_str(), "  spaced password  ");
+}
+
+#[test]
+fn empty_password_file_is_rejected() {
+    let dir = tempdir().expect("tempdir must be created");
+    let password = dir.path().join("password");
+    fs::write(&password, b"\n").expect("password file must be written");
+
+    let err = match filecrypt::sym::password_file::read_password_file(&password) {
+        Ok(_) => panic!("empty password file must fail"),
+        Err(err) => err,
+    };
+    assert!(matches!(err, AppError::EmptyPassword));
+}
+
+#[test]
+fn unified_password_cli_supports_output_and_json() {
+    let dir = tempdir().expect("tempdir must be created");
+    let input = dir.path().join("input.txt");
+    let encrypted = dir.path().join("cipher.bin");
+    let decrypted = dir.path().join("plain.txt");
+    let password = dir.path().join("password.txt");
+    fs::write(&input, b"unified password cli").expect("input must be written");
+    fs::write(&password, b"test password\n").expect("password must be written");
+
+    let output = AssertCommand::cargo_bin("fcrypt")
+        .expect("binary must build")
+        .args([
+            "--json",
+            "encrypt",
+            input.to_str().expect("input path must be utf-8"),
+            "--output",
+            encrypted.to_str().expect("output path must be utf-8"),
+            "--password-file",
+            password.to_str().expect("password path must be utf-8"),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let report: serde_json::Value =
+        serde_json::from_slice(&output).expect("JSON output must parse");
+    assert_eq!(report["operation"], "encrypt");
+    assert_eq!(report["mode"], "password");
+    assert!(!String::from_utf8_lossy(&output).contains("test password"));
+
+    AssertCommand::cargo_bin("fcrypt")
+        .expect("binary must build")
+        .args([
+            "decrypt",
+            encrypted.to_str().expect("input path must be utf-8"),
+            "--output",
+            decrypted.to_str().expect("output path must be utf-8"),
+            "--password-file",
+            password.to_str().expect("password path must be utf-8"),
+            "--quiet",
+        ])
+        .assert()
+        .success();
+    assert_eq!(
+        fs::read(&decrypted).expect("decrypted file must read"),
+        b"unified password cli"
+    );
+}
+
+#[test]
+fn new_password_and_phrase_commands_generate_output() {
+    AssertCommand::cargo_bin("fcrypt")
+        .expect("binary must build")
+        .args(["password", "generate", "--length", "24"])
+        .assert()
+        .success();
+    AssertCommand::cargo_bin("fcrypt")
+        .expect("binary must build")
+        .args(["phrase", "generate", "--words", "4"])
+        .assert()
+        .success();
+}
+
+#[cfg(feature = "pqc")]
+#[test]
+fn unified_pqc_cli_identity_sign_verify_and_decrypt_roundtrip() {
+    let dir = tempdir().expect("tempdir must be created");
+    let input = dir.path().join("report.txt");
+    let encrypted = dir.path().join("report.bin");
+    let decrypted = dir.path().join("report.out");
+    fs::write(&input, b"unified pqc workflow").expect("input must be written");
+
+    AssertCommand::cargo_bin("fcrypt")
+        .expect("binary must build")
+        .current_dir(dir.path())
+        .args(["identity", "create", "alice", "--quiet"])
+        .assert()
+        .success();
+
+    let recipient_public = dir.path().join("alice_recipient_default.pub");
+    let recipient_secret = dir.path().join("alice_recipient_default.sec");
+    let signing_public = dir.path().join("alice_signer_mldsa87.pub");
+    let signing_secret = dir.path().join("alice_signer_mldsa87.sec");
+    AssertCommand::cargo_bin("fcrypt")
+        .expect("binary must build")
+        .args([
+            "encrypt",
+            input.to_str().expect("input path must be utf-8"),
+            "--output",
+            encrypted.to_str().expect("output path must be utf-8"),
+            "--recipient",
+            recipient_public.to_str().expect("key path must be utf-8"),
+            "--sign",
+            "--sign-key",
+            signing_secret.to_str().expect("key path must be utf-8"),
+            "--quiet",
+        ])
+        .assert()
+        .success();
+
+    let verification = AssertCommand::cargo_bin("fcrypt")
+        .expect("binary must build")
+        .args([
+            "--json",
+            "verify",
+            encrypted.to_str().expect("ciphertext path must be utf-8"),
+            "--key",
+            signing_public.to_str().expect("key path must be utf-8"),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let verification: serde_json::Value =
+        serde_json::from_slice(&verification).expect("verification JSON must parse");
+    assert_eq!(verification["verified"], true);
+
+    AssertCommand::cargo_bin("fcrypt")
+        .expect("binary must build")
+        .args([
+            "decrypt",
+            encrypted.to_str().expect("ciphertext path must be utf-8"),
+            "--output",
+            decrypted.to_str().expect("output path must be utf-8"),
+            "--identity",
+            recipient_secret.to_str().expect("key path must be utf-8"),
+            "--verify",
+            signing_public.to_str().expect("key path must be utf-8"),
+            "--quiet",
+        ])
+        .assert()
+        .success();
+    assert_eq!(
+        fs::read(&decrypted).expect("decrypted file must read"),
+        b"unified pqc workflow"
+    );
+}
+
+#[cfg(feature = "pqc")]
+#[test]
+fn identity_list_and_inspect_json_never_expose_secret_material() {
+    let dir = tempdir().expect("tempdir must be created");
+    AssertCommand::cargo_bin("fcrypt")
+        .expect("binary must build")
+        .current_dir(dir.path())
+        .args(["identity", "create", "alice", "--quiet"])
+        .assert()
+        .success();
+    let secret_path = dir.path().join("alice_recipient_default.sec");
+    let secret = json_field(&secret_path, "mlkem1024_secret");
+
+    let list = AssertCommand::cargo_bin("fcrypt")
+        .expect("binary must build")
+        .args([
+            "--json",
+            "identity",
+            "list",
+            "--keys-dir",
+            dir.path().to_str().expect("directory path must be utf-8"),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let list: serde_json::Value = serde_json::from_slice(&list).expect("list JSON must parse");
+    assert_eq!(list["operation"], "identity_list");
+    assert_eq!(
+        list["data"]
+            .as_array()
+            .expect("data must be an array")
+            .len(),
+        4
+    );
+    assert!(!list.to_string().contains(&secret));
+
+    let inspect = AssertCommand::cargo_bin("fcrypt")
+        .expect("binary must build")
+        .args([
+            "--json",
+            "identity",
+            "inspect",
+            secret_path.to_str().expect("key path must be utf-8"),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert!(!String::from_utf8_lossy(&inspect).contains(&secret));
+}
+
+#[cfg(feature = "pqc")]
+#[test]
+fn forced_keyset_failure_restores_previously_published_files() {
+    let dir = tempdir().expect("tempdir must be created");
+    let generated = keys::generate_named_key_pair_files(dir.path(), "alice", None, false)
+        .expect("initial key pair must be generated");
+    let original_public = fs::read(&generated.recipient_public_path).expect("public key must read");
+    let original_secret = fs::read(&generated.recipient_secret_path).expect("secret key must read");
+    fs::remove_file(&generated.signing_public_path).expect("signing public key must be removed");
+    fs::create_dir(&generated.signing_public_path).expect("blocking directory must be created");
+
+    let err = match keys::generate_named_key_pair_files(dir.path(), "alice", None, true) {
+        Ok(_) => panic!("publication must fail when one destination is a directory"),
+        Err(err) => err,
+    };
+    assert!(matches!(err, AppError::Io(_)));
+    assert_eq!(
+        fs::read(&generated.recipient_public_path).expect("public key must read"),
+        original_public
+    );
+    assert_eq!(
+        fs::read(&generated.recipient_secret_path).expect("secret key must read"),
+        original_secret
+    );
 }
 
 #[test]
@@ -468,6 +777,137 @@ fn keygen_pair_cli_accepts_lifetime_days() {
         .and_then(|value| value.as_u64())
         .expect("expires_at_unix must be present");
     assert_eq!(expires_at - created_at, 30 * 86_400);
+}
+
+#[cfg(all(feature = "pqc", unix))]
+#[test]
+fn named_key_generation_preserves_existing_directory_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempdir().expect("tempdir must be created");
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755))
+        .expect("directory permissions must be set");
+
+    keys::generate_named_key_pair_files(dir.path(), "permissions", None, false)
+        .expect("key pair must be generated");
+
+    assert_eq!(
+        fs::metadata(dir.path())
+            .expect("directory metadata must read")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o755
+    );
+}
+
+#[cfg(feature = "pqc")]
+#[test]
+fn named_key_generation_preflights_all_paths_before_writing() {
+    let dir = tempdir().expect("tempdir must be created");
+    let conflict = dir.path().join("broken_signer_mldsa87.pub");
+    fs::write(&conflict, b"existing key").expect("conflict file must be written");
+
+    let err = match keys::generate_named_key_pair_files(dir.path(), "broken", None, false) {
+        Ok(_) => panic!("an existing destination must fail before any key is published"),
+        Err(err) => err,
+    };
+
+    assert!(matches!(err, AppError::OutputExists(path) if path == conflict));
+    assert!(!dir.path().join("broken_recipient_default.pub").exists());
+    assert!(!dir.path().join("broken_recipient_default.sec").exists());
+    assert!(!dir.path().join("broken_signer_mldsa87.sec").exists());
+    assert_eq!(
+        fs::read(conflict).expect("conflict must remain readable"),
+        b"existing key"
+    );
+}
+
+#[cfg(feature = "pqc")]
+#[test]
+fn recipient_auto_discovery_skips_malformed_key_files() {
+    let dir = tempdir().expect("tempdir must be created");
+    keys::generate_named_key_pair_files(dir.path(), "valid", None, false)
+        .expect("valid key pair must be generated");
+    fs::write(
+        dir.path().join("00000000_recipient_default.sec"),
+        b"not json",
+    )
+    .expect("malformed key must be written");
+
+    let identities = keys::read_recipient_secret_keys(dir.path())
+        .expect("valid identities must still be discovered");
+
+    assert_eq!(identities.len(), 1);
+}
+
+#[cfg(feature = "pqc")]
+#[test]
+fn expired_recipient_secrets_decrypt_and_expired_signing_public_keys_verify() {
+    let dir = tempdir().expect("tempdir must be created");
+    let generated = keys::generate_named_key_pair_files(dir.path(), "expired", None, false)
+        .expect("key pair must be generated");
+    let input = dir.path().join("input.txt");
+    let encrypted = dir.path().join("input.bin");
+    let output = dir.path().join("output.txt");
+    let original = b"archived data";
+    fs::write(&input, original).expect("input must be written");
+
+    asym::encrypt::encrypt_file(
+        &AssymEncryptArgs {
+            input,
+            output: Some(encrypted.clone()),
+            recipient_public: Some(generated.recipient_public_path.clone()),
+            keys_dir: None,
+            sign: false,
+            sign_key: Some(generated.signing_secret_path.clone()),
+            force: false,
+        },
+        &test_config(64),
+        |_| {},
+    )
+    .expect("signed ciphertext must be created before expiration");
+
+    set_key_lifetime(&generated.recipient_public_path, 0, 1);
+    set_key_lifetime(&generated.recipient_secret_path, 0, 1);
+    set_key_lifetime(&generated.signing_public_path, 0, 1);
+    set_key_lifetime(&generated.signing_secret_path, 0, 1);
+
+    assert!(keys::read_recipient_public_key(&generated.recipient_public_path).is_err());
+    assert!(keys::read_signing_secret_key(&generated.signing_secret_path).is_err());
+    assert!(keys::read_recipient_secret_key(&generated.recipient_secret_path).is_ok());
+    assert!(keys::read_signing_public_key(&generated.signing_public_path).is_ok());
+
+    asym::decrypt::decrypt_file(
+        &AssymDecryptArgs {
+            input: encrypted,
+            output: Some(output.clone()),
+            identity: Some(generated.recipient_secret_path),
+            keys_dir: None,
+            verify: Some(generated.signing_public_path),
+            require_signature: true,
+            force: false,
+        },
+        |_| {},
+    )
+    .expect("expired decryption and verification keys must remain usable for archives");
+
+    assert_eq!(fs::read(output).expect("output must read"), original);
+}
+
+#[cfg(feature = "pqc")]
+#[test]
+fn secret_key_debug_output_is_redacted() {
+    let dir = tempdir().expect("tempdir must be created");
+    let generated = keys::generate_named_key_pair_files(dir.path(), "redacted", None, false)
+        .expect("key pair must be generated");
+    let serialized_secret = json_field(&generated.recipient_secret_path, "mlkem1024_secret");
+    let secret = keys::read_recipient_secret_key(&generated.recipient_secret_path)
+        .expect("secret key must be readable");
+
+    let debug = format!("{secret:?}");
+    assert!(debug.contains("<redacted>"));
+    assert!(!debug.contains(&serialized_secret));
 }
 
 #[test]
@@ -704,6 +1144,18 @@ fn json_field(path: &Path, field: &str) -> String {
 fn json_value(path: &Path) -> serde_json::Value {
     serde_json::from_slice(&fs::read(path).expect("json key file must be readable"))
         .expect("json key file must parse")
+}
+
+#[cfg(feature = "pqc")]
+fn set_key_lifetime(path: &Path, created_at_unix: u64, expires_at_unix: u64) {
+    let mut value = json_value(path);
+    value["created_at_unix"] = serde_json::Value::from(created_at_unix);
+    value["expires_at_unix"] = serde_json::Value::from(expires_at_unix);
+    fs::write(
+        path,
+        serde_json::to_vec(&value).expect("key JSON must serialize"),
+    )
+    .expect("key JSON must be updated");
 }
 
 #[test]

@@ -72,6 +72,13 @@ struct ManifestV1 {
     file_secret: Vec<u8>,
 }
 
+impl Drop for ManifestV1 {
+    fn drop(&mut self) {
+        self.magic.zeroize();
+        self.file_secret.zeroize();
+    }
+}
+
 #[derive(Debug)]
 struct OpenedPrelude {
     file_nonce: [u8; FILE_NONCE_LEN],
@@ -117,6 +124,9 @@ where
     W: Write,
     F: FnMut(u64),
 {
+    if password.is_empty() {
+        return Err(AppError::EmptyPassword);
+    }
     validate_chunk_size(config.chunk_size)?;
 
     let mut file_nonce = [0u8; FILE_NONCE_LEN];
@@ -484,9 +494,12 @@ fn open_pqc_slots(
             let slot = slot_slice(slots, slot_index)?;
             let mlkem_ct = &slot[..MLKEM1024_CT_LEN];
             let hqc_ct = &slot[MLKEM1024_CT_LEN..PQC_WRAP_OFFSET];
-            let Ok((mut mlkem_ss, mut hqc_ss)) =
-                pqc::decapsulate_recipient(&mlkem_secret, &hqc_secret, mlkem_ct, hqc_ct)
-            else {
+            let Ok((mut mlkem_ss, mut hqc_ss)) = pqc::decapsulate_recipient(
+                mlkem_secret.as_ref(),
+                hqc_secret.as_ref(),
+                mlkem_ct,
+                hqc_ct,
+            ) else {
                 continue;
             };
 
@@ -1019,9 +1032,10 @@ fn derive_pqc_slot_key(
     hqc_ss: &[u8],
     label: &[u8],
 ) -> Result<Zeroizing<[u8; KEY_LEN]>> {
+    let ikm = Zeroizing::new(pqc_slot_ikm(mlkem_ss, hqc_ss));
     let hk = HkdfSha3_512::new(
         Some(&pqc_slot_salt(file_nonce, slot_index, mlkem_ct, hqc_ct)),
-        &pqc_slot_ikm(mlkem_ss, hqc_ss),
+        ikm.as_ref(),
     );
     let mut out = Zeroizing::new([0u8; KEY_LEN]);
     hk.expand(label, out.as_mut())
@@ -1038,9 +1052,10 @@ fn derive_pqc_slot_nonce(
     hqc_ss: &[u8],
     label: &[u8],
 ) -> Result<[u8; NONCE_LEN]> {
+    let ikm = Zeroizing::new(pqc_slot_ikm(mlkem_ss, hqc_ss));
     let hk = HkdfSha3_512::new(
         Some(&pqc_slot_salt(file_nonce, slot_index, mlkem_ct, hqc_ct)),
-        &pqc_slot_ikm(mlkem_ss, hqc_ss),
+        ikm.as_ref(),
     );
     let mut out = [0u8; NONCE_LEN];
     hk.expand(label, &mut out)

@@ -1,6 +1,6 @@
 use serde::Serialize;
 use std::fs::File;
-use std::io::BufReader;
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use crate::asym::cli::AssymSignArgs;
@@ -16,6 +16,11 @@ pub struct SignOutcome {
     pub keys_dir: PathBuf,
     pub generated_signer_public: Option<PathBuf>,
     pub generated_signer_secret: Option<PathBuf>,
+}
+
+pub struct VerifyOutcome {
+    pub signer_key_id: String,
+    pub signer_key_expired: bool,
 }
 
 #[derive(Serialize)]
@@ -52,13 +57,15 @@ pub fn sign_file(args: &AssymSignArgs) -> Result<SignOutcome> {
         generated.secret
     };
 
-    let transcript = opaque_signature_transcript(&args.input)?;
+    let mut input = File::open(&args.input)?;
+    let input_len = input.metadata()?.len();
+    let detached = create_detached_signature_from_reader(&mut input, input_len, &signer)?;
     let output = args
         .output
         .clone()
         .map(Ok)
         .unwrap_or_else(|| envelope::detached_signature_path(&args.input))?;
-    write_detached_signature(&signer, &transcript, &output, args.force)?;
+    write_detached_signature(&detached, &output, args.force)?;
     Ok(SignOutcome {
         output,
         embedded: false,
@@ -68,20 +75,30 @@ pub fn sign_file(args: &AssymSignArgs) -> Result<SignOutcome> {
     })
 }
 
-pub(crate) fn sign_detached_with_secret(
-    input: &Path,
+pub(crate) fn create_detached_signature_from_reader<R>(
+    reader: &mut R,
+    input_len: u64,
     signer: &keys::SigningSecretKeyBundle,
-    output: &Path,
-    force: bool,
-) -> Result<()> {
-    let transcript = opaque_signature_transcript(input)?;
-    write_detached_signature(signer, &transcript, output, force)
+) -> Result<envelope::DetachedSignature>
+where
+    R: Read + Seek,
+{
+    let transcript = opaque_signature_transcript_from_reader(reader, input_len)?;
+    detached_signature_from_transcript(signer, &transcript)
 }
 
-pub(crate) fn verify_detached_signature(input: &Path, verify_key: &Path) -> Result<()> {
+pub(crate) fn verify_detached_signature<R>(
+    input_path: &Path,
+    verify_key: &Path,
+    reader: &mut R,
+    input_len: u64,
+) -> Result<()>
+where
+    R: Read + Seek,
+{
     pqc::ensure_enabled()?;
     let public_key = keys::read_signing_public_key(verify_key)?;
-    let detached_path = envelope::detached_signature_path(input)?;
+    let detached_path = envelope::detached_signature_path(input_path)?;
     if !detached_path.exists() {
         return Err(AppError::SignatureRequired);
     }
@@ -102,16 +119,35 @@ pub(crate) fn verify_detached_signature(input: &Path, verify_key: &Path) -> Resu
     }
 
     let public_key_bytes = public_key.mldsa87_public_bytes()?;
-    let transcript = opaque_signature_transcript(input)?;
+    let transcript = opaque_signature_transcript_from_reader(reader, input_len)?;
     pqc::verify_mldsa87(&public_key_bytes, &transcript, &signature.signature)
 }
 
-fn write_detached_signature(
-    signer: &keys::SigningSecretKeyBundle,
-    transcript: &[u8],
+pub fn verify_file(input: &Path, verify_key: &Path) -> Result<VerifyOutcome> {
+    let public_key = keys::read_signing_public_key(verify_key)?;
+    let signer_key_id = public_key.key_id.clone();
+    let signer_key_expired = public_key.is_expired();
+    let mut file = File::open(input)?;
+    let input_len = file.metadata()?.len();
+    verify_detached_signature(input, verify_key, &mut file, input_len)?;
+    Ok(VerifyOutcome {
+        signer_key_id,
+        signer_key_expired,
+    })
+}
+
+pub(crate) fn write_detached_signature(
+    detached: &envelope::DetachedSignature,
     output: &Path,
     force: bool,
 ) -> Result<()> {
+    keys::write_json_atomic(output, detached, false, force)
+}
+
+fn detached_signature_from_transcript(
+    signer: &keys::SigningSecretKeyBundle,
+    transcript: &[u8],
+) -> Result<envelope::DetachedSignature> {
     let signing_secret = signer.mldsa87_secret_bytes()?;
     let signature = pqc::sign_mldsa87(&signing_secret, transcript)?;
     let signature_section = envelope::SignatureSection {
@@ -120,14 +156,19 @@ fn write_detached_signature(
         transcript_hash_alg: "SHA3-512".to_string(),
         signature,
     };
-    let detached = envelope::signature_section_to_detached(&signature_section);
-    keys::write_json_atomic(output, &detached, false, force)
+    Ok(envelope::signature_section_to_detached(&signature_section))
 }
 
-fn opaque_signature_transcript(input: &Path) -> Result<Vec<u8>> {
-    let mut file = File::open(input)?;
-    let file_len = file.metadata()?.len();
-    let ciphertext_hash = envelope::ciphertext_hash_from_reader(&mut file)?;
+fn opaque_signature_transcript_from_reader<R: Read + Seek>(
+    reader: &mut R,
+    file_len: u64,
+) -> Result<Vec<u8>> {
+    reader.seek(SeekFrom::Start(0))?;
+    let ciphertext_hash = envelope::ciphertext_hash_from_reader(reader)?;
+    if reader.stream_position()? != file_len {
+        return Err(AppError::InputChangedDuringProcessing);
+    }
+    reader.seek(SeekFrom::Start(0))?;
     let transcript = OpaqueSignatureTranscript {
         version: 1,
         domain: OPAQUE_SIGNATURE_DOMAIN,

@@ -3,11 +3,13 @@ use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
+use std::fmt;
 use std::fs;
 use std::io::{BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tempfile::NamedTempFile;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::asym::{envelope, pqc};
 use crate::error::{AppError, Result};
@@ -17,6 +19,11 @@ use std::os::unix::fs::PermissionsExt;
 
 const RECIPIENT_MODE: &str = "default";
 pub const MAX_AUTO_DISCOVERED_RECIPIENT_IDENTITIES: usize = 32;
+
+pub struct RecipientSecretKeyLoad {
+    pub identities: Vec<RecipientSecretKeyBundle>,
+    pub skipped_paths: Vec<PathBuf>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecipientAlgorithms {
@@ -43,7 +50,7 @@ pub struct RecipientPublicKeyBundle {
     pub hqc256_public: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct RecipientSecretKeyBundle {
     pub version: u16,
     #[serde(rename = "type")]
@@ -56,8 +63,8 @@ pub struct RecipientSecretKeyBundle {
     pub created_at_unix: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at_unix: Option<u64>,
-    pub mlkem1024_secret: String,
-    pub hqc256_secret: String,
+    pub mlkem1024_secret: SecretString,
+    pub hqc256_secret: SecretString,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,7 +83,7 @@ pub struct SigningPublicKeyBundle {
     pub mldsa87_public: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct SigningSecretKeyBundle {
     pub version: u16,
     #[serde(rename = "type")]
@@ -89,7 +96,69 @@ pub struct SigningSecretKeyBundle {
     pub created_at_unix: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at_unix: Option<u64>,
-    pub mldsa87_secret: String,
+    pub mldsa87_secret: SecretString,
+}
+
+/// A serialized secret that is wiped when its owning key bundle is dropped.
+#[derive(Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SecretString(String);
+
+impl SecretString {
+    fn new(value: String) -> Self {
+        Self(value)
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Drop for SecretString {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
+
+impl fmt::Debug for SecretString {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<redacted>")
+    }
+}
+
+impl fmt::Debug for RecipientSecretKeyBundle {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RecipientSecretKeyBundle")
+            .field("version", &self.version)
+            .field("kind", &self.kind)
+            .field("mode", &self.mode)
+            .field("algorithms", &self.algorithms)
+            .field("label8", &self.label8)
+            .field("key_id", &self.key_id)
+            .field("created_at_unix", &self.created_at_unix)
+            .field("expires_at_unix", &self.expires_at_unix)
+            .field("mlkem1024_secret", &self.mlkem1024_secret)
+            .field("hqc256_secret", &self.hqc256_secret)
+            .finish()
+    }
+}
+
+impl fmt::Debug for SigningSecretKeyBundle {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SigningSecretKeyBundle")
+            .field("version", &self.version)
+            .field("kind", &self.kind)
+            .field("algorithm", &self.algorithm)
+            .field("hash", &self.hash)
+            .field("label8", &self.label8)
+            .field("key_id", &self.key_id)
+            .field("created_at_unix", &self.created_at_unix)
+            .field("expires_at_unix", &self.expires_at_unix)
+            .field("mldsa87_secret", &self.mldsa87_secret)
+            .finish()
+    }
 }
 
 pub struct GeneratedRecipientKeys {
@@ -154,12 +223,16 @@ impl RecipientPublicKeyBundle {
 }
 
 impl RecipientSecretKeyBundle {
-    pub fn mlkem1024_secret_bytes(&self) -> Result<Vec<u8>> {
-        decode_base64(&self.mlkem1024_secret, "mlkem1024_secret")
+    pub fn mlkem1024_secret_bytes(&self) -> Result<Zeroizing<Vec<u8>>> {
+        decode_base64(self.mlkem1024_secret.as_str(), "mlkem1024_secret").map(Zeroizing::new)
     }
 
-    pub fn hqc256_secret_bytes(&self) -> Result<Vec<u8>> {
-        decode_base64(&self.hqc256_secret, "hqc256_secret")
+    pub fn hqc256_secret_bytes(&self) -> Result<Zeroizing<Vec<u8>>> {
+        decode_base64(self.hqc256_secret.as_str(), "hqc256_secret").map(Zeroizing::new)
+    }
+
+    pub fn is_expired(&self) -> bool {
+        is_expired(self.expires_at_unix)
     }
 }
 
@@ -167,11 +240,21 @@ impl SigningPublicKeyBundle {
     pub fn mldsa87_public_bytes(&self) -> Result<Vec<u8>> {
         decode_base64(&self.mldsa87_public, "mldsa87_public")
     }
+
+    pub fn is_expired(&self) -> bool {
+        is_expired(self.expires_at_unix)
+    }
 }
 
 impl SigningSecretKeyBundle {
-    pub fn mldsa87_secret_bytes(&self) -> Result<Vec<u8>> {
-        decode_base64(&self.mldsa87_secret, "mldsa87_secret")
+    pub fn mldsa87_secret_bytes(&self) -> Result<Zeroizing<Vec<u8>>> {
+        decode_base64(self.mldsa87_secret.as_str(), "mldsa87_secret").map(Zeroizing::new)
+    }
+}
+
+impl RecipientPublicKeyBundle {
+    pub fn is_expired(&self) -> bool {
+        is_expired(self.expires_at_unix)
     }
 }
 
@@ -209,8 +292,8 @@ pub fn generate_recipient_key_files(
         key_id,
         created_at_unix: None,
         expires_at_unix: None,
-        mlkem1024_secret: STANDARD.encode(&keypair.mlkem1024_secret),
-        hqc256_secret: STANDARD.encode(&keypair.hqc256_secret),
+        mlkem1024_secret: SecretString::new(STANDARD.encode(&keypair.mlkem1024_secret)),
+        hqc256_secret: SecretString::new(STANDARD.encode(&keypair.hqc256_secret)),
     };
 
     let public_path = keys_dir.join(format!("{label8}_recipient_default.pub"));
@@ -254,7 +337,7 @@ pub fn generate_signing_key_files(keys_dir: &Path, force: bool) -> Result<Genera
         key_id,
         created_at_unix: None,
         expires_at_unix: None,
-        mldsa87_secret: STANDARD.encode(&keypair.mldsa87_secret),
+        mldsa87_secret: SecretString::new(STANDARD.encode(&keypair.mldsa87_secret)),
     };
 
     let public_path = keys_dir.join(format!("{label8}_signer_mldsa87.pub"));
@@ -279,6 +362,19 @@ pub fn generate_named_key_pair_files(
     pqc::ensure_enabled()?;
     validate_key_file_name(name)?;
     prepare_keys_dir(keys_dir)?;
+    let recipient_public_path = keys_dir.join(format!("{name}_recipient_default.pub"));
+    let recipient_secret_path = keys_dir.join(format!("{name}_recipient_default.sec"));
+    let signing_public_path = keys_dir.join(format!("{name}_signer_mldsa87.pub"));
+    let signing_secret_path = keys_dir.join(format!("{name}_signer_mldsa87.sec"));
+    preflight_output_paths(
+        &[
+            &recipient_public_path,
+            &recipient_secret_path,
+            &signing_public_path,
+            &signing_secret_path,
+        ],
+        force,
+    )?;
     let lifetime = key_lifetime(lifetime_days)?;
 
     let recipient_keypair = pqc::generate_recipient_keypair()?;
@@ -310,8 +406,8 @@ pub fn generate_named_key_pair_files(
         key_id: recipient_key_id,
         created_at_unix: lifetime.created_at_unix,
         expires_at_unix: lifetime.expires_at_unix,
-        mlkem1024_secret: STANDARD.encode(&recipient_keypair.mlkem1024_secret),
-        hqc256_secret: STANDARD.encode(&recipient_keypair.hqc256_secret),
+        mlkem1024_secret: SecretString::new(STANDARD.encode(&recipient_keypair.mlkem1024_secret)),
+        hqc256_secret: SecretString::new(STANDARD.encode(&recipient_keypair.hqc256_secret)),
     };
 
     let signing_keypair = pqc::generate_signing_keypair()?;
@@ -338,17 +434,16 @@ pub fn generate_named_key_pair_files(
         key_id: signing_key_id,
         created_at_unix: lifetime.created_at_unix,
         expires_at_unix: lifetime.expires_at_unix,
-        mldsa87_secret: STANDARD.encode(&signing_keypair.mldsa87_secret),
+        mldsa87_secret: SecretString::new(STANDARD.encode(&signing_keypair.mldsa87_secret)),
     };
 
-    let recipient_public_path = keys_dir.join(format!("{name}_recipient_default.pub"));
-    let recipient_secret_path = keys_dir.join(format!("{name}_recipient_default.sec"));
-    let signing_public_path = keys_dir.join(format!("{name}_signer_mldsa87.pub"));
-    let signing_secret_path = keys_dir.join(format!("{name}_signer_mldsa87.sec"));
-    write_json_atomic(&recipient_public_path, &recipient_public, false, force)?;
-    write_json_atomic(&recipient_secret_path, &recipient_secret, true, force)?;
-    write_json_atomic(&signing_public_path, &signing_public, false, force)?;
-    write_json_atomic(&signing_secret_path, &signing_secret, true, force)?;
+    let staged_files = vec![
+        stage_json_file(&recipient_public_path, &recipient_public, false)?,
+        stage_json_file(&recipient_secret_path, &recipient_secret, true)?,
+        stage_json_file(&signing_public_path, &signing_public, false)?,
+        stage_json_file(&signing_secret_path, &signing_secret, true)?,
+    ];
+    persist_staged_json_files(staged_files, force)?;
 
     Ok(GeneratedKeyPair {
         recipient_public_path,
@@ -401,7 +496,11 @@ pub fn find_recipient_secret_key(
         {
             continue;
         }
-        let bundle = read_recipient_secret_key(&path)?;
+        let bundle = match read_recipient_secret_key(&path) {
+            Ok(bundle) => bundle,
+            Err(AppError::InvalidAsymmetricKeyFile(_)) => continue,
+            Err(error) => return Err(error),
+        };
         if bundle.key_id == recipient_key_id {
             matches.push(bundle);
         }
@@ -415,6 +514,12 @@ pub fn find_recipient_secret_key(
 }
 
 pub fn read_recipient_secret_keys(keys_dir: &Path) -> Result<Vec<RecipientSecretKeyBundle>> {
+    Ok(read_recipient_secret_keys_with_diagnostics(keys_dir)?.identities)
+}
+
+pub fn read_recipient_secret_keys_with_diagnostics(
+    keys_dir: &Path,
+) -> Result<RecipientSecretKeyLoad> {
     if !keys_dir.exists() {
         return Err(AppError::NoMatchingIdentity);
     }
@@ -444,10 +549,22 @@ pub fn read_recipient_secret_keys(keys_dir: &Path) -> Result<Vec<RecipientSecret
     }
 
     identity_paths.sort();
-    identity_paths
-        .iter()
-        .map(|path| read_recipient_secret_key(path))
-        .collect()
+    let mut identities = Vec::new();
+    let mut skipped_paths = Vec::new();
+    for path in identity_paths {
+        match read_recipient_secret_key(&path) {
+            Ok(bundle) => identities.push(bundle),
+            Err(AppError::InvalidAsymmetricKeyFile(_)) => skipped_paths.push(path),
+            Err(error) => return Err(error),
+        }
+    }
+    if identities.is_empty() {
+        return Err(AppError::NoMatchingIdentity);
+    }
+    Ok(RecipientSecretKeyLoad {
+        identities,
+        skipped_paths,
+    })
 }
 
 pub fn write_json_atomic<T: Serialize>(
@@ -456,9 +573,17 @@ pub fn write_json_atomic<T: Serialize>(
     secret: bool,
     force: bool,
 ) -> Result<()> {
-    if path.exists() && !force {
-        return Err(AppError::OutputExists(path.to_path_buf()));
-    }
+    preflight_output_paths(&[path], force)?;
+    let staged = stage_json_file(path, value, secret)?;
+    persist_staged_json_files(vec![staged], force)
+}
+
+struct StagedJsonFile {
+    path: PathBuf,
+    temp: NamedTempFile,
+}
+
+fn stage_json_file<T: Serialize>(path: &Path, value: &T, secret: bool) -> Result<StagedJsonFile> {
     let dir = path
         .parent()
         .map(Path::to_path_buf)
@@ -480,25 +605,108 @@ pub fn write_json_atomic<T: Serialize>(
     }
 
     temp.as_file_mut().sync_all()?;
-    let result = if force {
-        temp.persist(path)
-    } else {
-        temp.persist_noclobber(path)
-    };
-    result.map(|_| ()).map_err(|e| {
-        if e.error.kind() == std::io::ErrorKind::AlreadyExists {
-            AppError::OutputExists(path.to_path_buf())
-        } else {
-            AppError::Io(e.error)
-        }
+    Ok(StagedJsonFile {
+        path: path.to_path_buf(),
+        temp,
     })
 }
 
-fn prepare_keys_dir(keys_dir: &Path) -> Result<()> {
-    fs::create_dir_all(keys_dir)?;
-    #[cfg(unix)]
-    fs::set_permissions(keys_dir, fs::Permissions::from_mode(0o700))?;
+fn preflight_output_paths(paths: &[&Path], force: bool) -> Result<()> {
+    if force {
+        return Ok(());
+    }
+    if let Some(path) = paths.iter().find(|path| path.exists()) {
+        return Err(AppError::OutputExists((*path).to_path_buf()));
+    }
     Ok(())
+}
+
+fn persist_staged_json_files(files: Vec<StagedJsonFile>, force: bool) -> Result<()> {
+    let mut pending = Vec::with_capacity(files.len());
+    for staged in files {
+        let backup = if force {
+            stage_backup(&staged.path)?
+        } else {
+            None
+        };
+        pending.push((staged, backup));
+    }
+
+    let mut committed: Vec<(PathBuf, Option<NamedTempFile>)> = Vec::new();
+    for (staged, backup) in pending {
+        let path = staged.path.clone();
+        let result = if force {
+            staged.temp.persist(&path)
+        } else {
+            staged.temp.persist_noclobber(&path)
+        };
+        if let Err(error) = result {
+            for (committed_path, backup) in committed {
+                restore_backup(&committed_path, backup);
+            }
+            return Err(if error.error.kind() == std::io::ErrorKind::AlreadyExists {
+                AppError::OutputExists(path)
+            } else {
+                AppError::Io(error.error)
+            });
+        }
+        committed.push((path, backup));
+    }
+    Ok(())
+}
+
+fn stage_backup(path: &Path) -> Result<Option<NamedTempFile>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let metadata = fs::metadata(path)?;
+    if !metadata.is_file() {
+        return Ok(None);
+    }
+    let dir = path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let mut backup = NamedTempFile::new_in(dir)?;
+    fs::copy(path, backup.path())?;
+    backup
+        .as_file_mut()
+        .set_permissions(metadata.permissions())?;
+    backup.as_file_mut().sync_all()?;
+    Ok(Some(backup))
+}
+
+fn restore_backup(path: &Path, backup: Option<NamedTempFile>) {
+    match backup {
+        Some(backup) => {
+            let _ = backup.persist(path);
+        }
+        None => {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+fn prepare_keys_dir(keys_dir: &Path) -> Result<()> {
+    if keys_dir.exists() {
+        return Ok(());
+    }
+
+    if let Some(parent) = keys_dir
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)?;
+    }
+    match fs::create_dir(keys_dir) {
+        Ok(()) => {
+            #[cfg(unix)]
+            fs::set_permissions(keys_dir, fs::Permissions::from_mode(0o700))?;
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(AppError::Io(error)),
+    }
 }
 
 fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
@@ -508,7 +716,8 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
 }
 
 fn validate_recipient_public_key(bundle: &RecipientPublicKeyBundle) -> Result<()> {
-    validate_key_lifetime(bundle.created_at_unix, bundle.expires_at_unix)?;
+    validate_key_lifetime_metadata(bundle.created_at_unix, bundle.expires_at_unix)?;
+    validate_key_not_expired(bundle.expires_at_unix)?;
     if bundle.version != 1
         || bundle.kind != "recipient-public"
         || !is_recipient_mode(&bundle.mode)
@@ -531,7 +740,7 @@ fn validate_recipient_public_key(bundle: &RecipientPublicKeyBundle) -> Result<()
 }
 
 fn validate_recipient_secret_key(bundle: &RecipientSecretKeyBundle) -> Result<()> {
-    validate_key_lifetime(bundle.created_at_unix, bundle.expires_at_unix)?;
+    validate_key_lifetime_metadata(bundle.created_at_unix, bundle.expires_at_unix)?;
     if bundle.version != 1
         || bundle.kind != "recipient-secret"
         || !is_recipient_mode(&bundle.mode)
@@ -549,7 +758,7 @@ fn validate_recipient_secret_key(bundle: &RecipientSecretKeyBundle) -> Result<()
 }
 
 fn validate_signing_public_key(bundle: &SigningPublicKeyBundle) -> Result<()> {
-    validate_key_lifetime(bundle.created_at_unix, bundle.expires_at_unix)?;
+    validate_key_lifetime_metadata(bundle.created_at_unix, bundle.expires_at_unix)?;
     if bundle.version != 1
         || bundle.kind != "signer-public"
         || bundle.algorithm != "ML-DSA-87"
@@ -571,7 +780,8 @@ fn validate_signing_public_key(bundle: &SigningPublicKeyBundle) -> Result<()> {
 }
 
 fn validate_signing_secret_key(bundle: &SigningSecretKeyBundle) -> Result<()> {
-    validate_key_lifetime(bundle.created_at_unix, bundle.expires_at_unix)?;
+    validate_key_lifetime_metadata(bundle.created_at_unix, bundle.expires_at_unix)?;
+    validate_key_not_expired(bundle.expires_at_unix)?;
     if bundle.version != 1
         || bundle.kind != "signer-secret"
         || bundle.algorithm != "ML-DSA-87"
@@ -585,6 +795,40 @@ fn validate_signing_secret_key(bundle: &SigningSecretKeyBundle) -> Result<()> {
     }
     let _ = bundle.mldsa87_secret_bytes()?;
     Ok(())
+}
+
+fn validate_key_lifetime_metadata(
+    created_at_unix: Option<u64>,
+    expires_at_unix: Option<u64>,
+) -> Result<()> {
+    if let (Some(created_at_unix), Some(expires_at_unix)) = (created_at_unix, expires_at_unix) {
+        if expires_at_unix <= created_at_unix {
+            return Err(AppError::InvalidAsymmetricKeyFile(
+                "key expiration must be after creation time".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_key_not_expired(expires_at_unix: Option<u64>) -> Result<()> {
+    if let Some(expires_at_unix) = expires_at_unix {
+        if unix_now()? >= expires_at_unix {
+            return Err(AppError::InvalidAsymmetricKeyFile(
+                "asymmetric key has expired".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn is_expired(expires_at_unix: Option<u64>) -> bool {
+    expires_at_unix.is_some_and(|expires_at_unix| {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_secs() >= expires_at_unix)
+            .unwrap_or(false)
+    })
 }
 
 fn canonical_recipient_public_material(mlkem_public: &[u8], hqc_public: &[u8]) -> Result<Vec<u8>> {
@@ -683,24 +927,6 @@ fn key_lifetime(lifetime_days: Option<u64>) -> Result<KeyLifetime> {
         created_at_unix: Some(created_at_unix),
         expires_at_unix,
     })
-}
-
-fn validate_key_lifetime(created_at_unix: Option<u64>, expires_at_unix: Option<u64>) -> Result<()> {
-    if let (Some(created_at_unix), Some(expires_at_unix)) = (created_at_unix, expires_at_unix) {
-        if expires_at_unix <= created_at_unix {
-            return Err(AppError::InvalidAsymmetricKeyFile(
-                "key expiration must be after creation time".to_string(),
-            ));
-        }
-    }
-    if let Some(expires_at_unix) = expires_at_unix {
-        if unix_now()? >= expires_at_unix {
-            return Err(AppError::InvalidAsymmetricKeyFile(
-                "asymmetric key has expired".to_string(),
-            ));
-        }
-    }
-    Ok(())
 }
 
 fn unix_now() -> Result<u64> {

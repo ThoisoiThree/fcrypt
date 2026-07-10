@@ -108,10 +108,21 @@ where
         writer.flush()?;
     }
     temp_output.as_file_mut().sync_all()?;
+    let prepared_signature = if let Some(signer) = signer.as_ref() {
+        let ciphertext_len = temp_output.as_file().metadata()?.len();
+        Some(sign::create_detached_signature_from_reader(
+            temp_output.as_file_mut(),
+            ciphertext_len,
+            signer,
+        )?)
+    } else {
+        None
+    };
     envelope::persist_temp_file(temp_output, &output, args.force)?;
-    if let (Some(signer), Some(detached_signature)) = (signer.as_ref(), detached_signature.as_ref())
+    if let (Some(signature), Some(detached_signature)) =
+        (prepared_signature.as_ref(), detached_signature.as_ref())
     {
-        sign::sign_detached_with_secret(&output, signer, detached_signature, args.force)?;
+        sign::write_detached_signature(signature, detached_signature, args.force)?;
     }
 
     Ok(EncryptOutcome {
