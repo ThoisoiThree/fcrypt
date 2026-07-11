@@ -1,3 +1,4 @@
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use clap::Parser;
 use serde::Serialize;
 use std::env;
@@ -56,7 +57,11 @@ fn run(cli: Cli, options: OutputOptions) -> Result<()> {
         Command::Verify(args) => run_verify(&args.input, &args.key, options),
         Command::Identity(args) => run_identity(args.command, options),
         Command::Password(args) => match args.command {
-            PasswordCommand::Generate { length } => run_password_generate(length, options),
+            PasswordCommand::Generate {
+                length,
+                base64,
+                compatible,
+            } => run_password_generate(length, base64, compatible, options),
         },
         Command::Phrase(args) => match args.command {
             PhraseCommand::Generate { words, separator } => {
@@ -450,11 +455,25 @@ fn run_identity(command: IdentityCommand, options: OutputOptions) -> Result<()> 
     }
 }
 
-fn run_password_generate(length: usize, options: OutputOptions) -> Result<()> {
+fn run_password_generate(
+    length: usize,
+    base64: bool,
+    compatible: bool,
+    options: OutputOptions,
+) -> Result<()> {
     reject_machine_secret_output(options)?;
-    let password = keygen::generate_password(length)?;
+    let password = if compatible {
+        keygen::generate_compatible_password(length)?
+    } else {
+        keygen::generate_password(length)?
+    };
     let mut stdout = io::stdout().lock();
-    stdout.write_all(password.as_slice())?;
+    if base64 {
+        let encoded = zeroize::Zeroizing::new(STANDARD.encode(password.as_slice()));
+        stdout.write_all(encoded.as_bytes())?;
+    } else {
+        stdout.write_all(password.as_slice())?;
+    }
     stdout.write_all(b"\n")?;
     stdout.flush()?;
     Ok(())
@@ -601,7 +620,7 @@ fn run_legacy_keygen(args: filecrypt::cli::KeygenArgs, options: OutputOptions) -
             let length = args.length.ok_or_else(|| {
                 AppError::InvalidArgument("password length is required".to_string())
             })?;
-            run_password_generate(length, options)
+            run_password_generate(length, false, false, options)
         }
     }
 }
@@ -772,7 +791,9 @@ fn normalize_args(args: Vec<OsString>) -> Vec<OsString> {
     }
     args.into_iter()
         .map(|arg| {
-            if arg == "-sep" {
+            if arg == "-b64" {
+                OsString::from("--base64")
+            } else if arg == "-sep" {
                 OsString::from("--sep")
             } else if let Some(value) = arg.to_str().and_then(|arg| arg.strip_prefix("-sep=")) {
                 OsString::from(format!("--sep={value}"))
@@ -809,5 +830,16 @@ mod tests {
             args,
             vec![OsString::from("fcrypt"), OsString::from("help-all")]
         );
+    }
+
+    #[test]
+    fn base64_legacy_option_is_normalized() {
+        let args = normalize_args(vec![
+            OsString::from("fcrypt"),
+            OsString::from("password"),
+            OsString::from("generate"),
+            OsString::from("-b64"),
+        ]);
+        assert_eq!(args[3], OsString::from("--base64"));
     }
 }

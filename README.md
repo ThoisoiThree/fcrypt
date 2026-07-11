@@ -483,10 +483,15 @@ accepted for compatibility and still requires a verification key.
 
 ```bash
 fcrypt password generate --length 32
+fcrypt password generate --length 32 -c
+fcrypt password generate --length 32 -b
 ```
 
 `password generate` writes a random password with `N` characters to stdout followed by
 a newline. `N` must be between 1 and 4096.
+`-c`/`--compatible` restricts special characters to the widely accepted
+`!@#$%^&*_-+=` set. `-b`/`--base64` Base64-encodes the generated password
+before writing it. The legacy `-b64` spelling remains accepted.
 
 The password generator uses the operating system CSPRNG and this portable
 alphabet:

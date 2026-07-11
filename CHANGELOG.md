@@ -1,5 +1,8 @@
 # Changelog
 
+- Added Base64 output (`-b64`/`--base64`) and a conservative `--compatible`
+  alphabet to random password generation.
+
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),

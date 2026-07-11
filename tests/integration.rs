@@ -534,6 +534,52 @@ fn new_password_and_phrase_commands_generate_output() {
         .success();
 }
 
+#[test]
+fn password_generate_supports_base64_and_compatible_output() {
+    let base64_output = AssertCommand::cargo_bin("fcrypt")
+        .expect("binary must build")
+        .args(["password", "generate", "--length", "24", "-b"])
+        .output()
+        .expect("password generation must run");
+    assert!(base64_output.status.success());
+    let encoded = String::from_utf8(base64_output.stdout).expect("output must be UTF-8");
+    let decoded = base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        encoded.trim_end(),
+    )
+    .expect("output must be valid Base64");
+    assert_eq!(decoded.len(), 24);
+
+    let compatible_output = AssertCommand::cargo_bin("fcrypt")
+        .expect("binary must build")
+        .args(["password", "generate", "--length", "256", "-c"])
+        .output()
+        .expect("password generation must run");
+    assert!(compatible_output.status.success());
+    let password = compatible_output.stdout.strip_suffix(b"\n").unwrap();
+    assert_eq!(password.len(), 256);
+    assert!(password
+        .iter()
+        .all(|byte| filecrypt::keygen::password::COMPATIBLE_PASSWORD_ALPHABET.contains(byte)));
+
+    AssertCommand::cargo_bin("fcrypt")
+        .expect("binary must build")
+        .args(["password", "generate", "--length", "24", "-b64"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn password_generate_help_lists_short_options() {
+    AssertCommand::cargo_bin("fcrypt")
+        .expect("binary must build")
+        .args(["password", "generate", "--help"])
+        .assert()
+        .success()
+        .stdout(contains("-b, --base64"))
+        .stdout(contains("-c, --compatible"));
+}
+
 #[cfg(feature = "pqc")]
 #[test]
 fn unified_pqc_cli_identity_sign_verify_and_decrypt_roundtrip() {

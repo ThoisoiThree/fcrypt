@@ -272,6 +272,12 @@ pub enum PasswordCommand {
     Generate {
         #[arg(long, short = 'l', value_name = "N")]
         length: usize,
+        /// Encode the generated password as Base64.
+        #[arg(long = "base64", short = 'b')]
+        base64: bool,
+        /// Use a conservative alphabet accepted by most third-party services.
+        #[arg(long, short = 'c')]
+        compatible: bool,
     },
 }
 
