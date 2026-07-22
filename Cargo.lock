@@ -149,9 +149,9 @@ checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
 name = "bindgen"
-version = "0.71.1"
+version = "0.72.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5f58bf3d7db68cfbac37cfc485a8d711e87e064c3d0fe0435b92f7a407f9d6b3"
+checksum = "993776b509cfb49c750f11b8f07a46fa23e0a1386ffc01fb1e7d343efc387895"
 dependencies = [
  "bitflags",
  "cexpr",
@@ -461,7 +461,7 @@ checksum = "37909eebbb50d72f9059c3b6d82c0463f2ff062c9e95845c43a6c9c0355411be"
 
 [[package]]
 name = "fcrypt"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -472,7 +472,6 @@ dependencies = [
  "hex",
  "hkdf",
  "indicatif",
- "oqs",
  "predicates",
  "rand",
  "rpassword",
@@ -480,6 +479,7 @@ dependencies = [
  "serde_bytes",
  "serde_json",
  "sha3",
+ "tectonic-oqs",
  "tempfile",
  "thiserror",
  "zeroize",
@@ -780,30 +780,6 @@ name = "opaque-debug"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
-
-[[package]]
-name = "oqs"
-version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "48caac02cf42ba00b865a747e332828a75341d97ae35ad1ae9785e56de212e78"
-dependencies = [
- "cstr_core",
- "libc",
- "oqs-sys",
-]
-
-[[package]]
-name = "oqs-sys"
-version = "0.11.0+liboqs-0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ac6d66ee528a895ce5cc08851698d109c5d7ee5d7a0b3b40d61550eda91e414f"
-dependencies = [
- "bindgen",
- "build-deps",
- "cmake",
- "libc",
- "pkg-config",
-]
 
 [[package]]
 name = "password-hash"
@@ -1120,6 +1096,30 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "tectonic-oqs"
+version = "0.11.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ab9b6716e0dc70a790b2afe48fe7fd28ae8cb68befe0105676c458a2fb700d53"
+dependencies = [
+ "cstr_core",
+ "libc",
+ "tectonic-oqs-sys",
+]
+
+[[package]]
+name = "tectonic-oqs-sys"
+version = "0.11.2+liboqs-0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ab3fbcf31fdc1978f1b48a4589af24a2125dfec13daf68dc8eacfdc4b75a7ad3"
+dependencies = [
+ "bindgen",
+ "build-deps",
+ "cmake",
+ "libc",
+ "pkg-config",
 ]
 
 [[package]]

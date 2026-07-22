@@ -131,11 +131,12 @@ GitHub Releases provide raw binary files and `.sha256` checksum files for:
 cargo build --release --locked
 ```
 
-Asymmetric PQC mode is enabled by default through the `pqc` feature and uses
-Open Quantum Safe `liboqs` through Rust `oqs` bindings. Building with PQC
-support can require:
+Asymmetric PQC mode is enabled by default through the `pqc` feature and uses a
+patched Open Quantum Safe `liboqs` 0.15.x build through the `tectonic-oqs`
+bindings. Building with PQC support can require:
 
 - Rust stable
+- Git and network access while the versioned liboqs source is fetched
 - C compiler
 - CMake
 - platform build tools
@@ -280,6 +281,12 @@ fcrypt decrypt report.pdf.bin \
   --identity ./alice_recipient_default.sec \
   --verify ./alice_signer_mldsa87.pub
 ```
+
+New signed containers carry an authenticated signer requirement inside their
+opaque recipient slot. Decryption therefore fails closed if `.sig` is removed,
+and also requires `--verify <signer.pub>` when the sidecar is present. Always
+pass `--verify` when authenticity of older containers is required; containers
+created before this marker cannot reveal that a sidecar was removed.
 
 ### Generate named recipient and signing keys
 
@@ -670,6 +677,7 @@ The test suite covers:
 - A recipient `.sec` key can decrypt matching opaque files.
 - A signer `.sec` key can create signatures as that signer.
 - Use `--verify <signer.pub>` when authenticity is mandatory during decryption.
+- Asymmetric key JSON and detached signature files are limited to 64 KiB.
 - Expired recipient secret keys remain usable for archival decryption, and
   expired signing public keys remain usable for historical verification. Expired
   recipient public keys and signing secret keys cannot be used for new work.

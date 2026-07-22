@@ -7,6 +7,25 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-07-23
+
+### Security
+
+- Updated the liboqs bindings to `tectonic-oqs` 0.11.2 and its patched liboqs
+  0.15.x source, which includes the HQC compiler-optimization fix for
+  CVE-2025-52473 while retaining opaque v1 key and ciphertext compatibility.
+- Made signed asymmetric encryption publish the ciphertext and detached
+  signature as one transaction, preserving existing outputs if either publish
+  step fails.
+- Made generated recipient and signing public/secret key pairs transactional.
+- Reused one validated signing public-key bundle throughout verification,
+  removing the verification-key path replacement window.
+- Added a backward-compatible authenticated signer requirement to signed PQC
+  slots and made decryption fail closed when the detached signature is ignored
+  or removed. Existing signed opaque v1 containers remain readable.
+- Limited asymmetric key JSON and detached signature inputs to 64 KiB before
+  parsing.
+
 ## [0.3.2] - 2026-07-22
 
 ### Added
@@ -105,7 +124,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Safe temp-file output workflow (finalize only after successful operation).
 - Integration tests for roundtrip, edge cases, corruption/truncation, and naming logic.
 
-[Unreleased]: https://github.com/ThoisoiThree/fcrypt/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/ThoisoiThree/fcrypt/compare/v0.3.3...HEAD
+[0.3.3]: https://github.com/ThoisoiThree/fcrypt/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/ThoisoiThree/fcrypt/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/ThoisoiThree/fcrypt/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/ThoisoiThree/fcrypt/compare/v0.2.0...v0.3.0

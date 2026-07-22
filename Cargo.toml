@@ -1,6 +1,6 @@
 [package]
 name = "fcrypt"
-version = "0.3.2"
+version = "0.3.3"
 edition = "2021"
 rust-version = "1.74"
 description = "Cross-platform CLI for password-based file encryption and decryption"
@@ -30,7 +30,8 @@ base64 = "0.22"
 ciborium = "0.2"
 hex = "0.4"
 hkdf = "0.12"
-oqs = { version = "0.11", optional = true, default-features = false, features = ["std", "kems", "sigs", "vendored"] }
+# Upstream oqs 0.11.0 vendors vulnerable liboqs 0.13.0 (CVE-2025-52473).
+oqs = { package = "tectonic-oqs", version = "0.11.2", optional = true, default-features = false, features = ["std", "ml_kem", "hqc", "ml_dsa", "vendored"] }
 rand = "0.8.6"
 rpassword = "7.5.1"
 serde = { version = "1", features = ["derive"] }

@@ -1,5 +1,5 @@
 use std::fs::{self, File};
-use std::io::{BufReader, BufWriter, Seek, SeekFrom, Write};
+use std::io::{self, BufReader, BufWriter, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use tempfile::NamedTempFile;
 
@@ -20,6 +20,8 @@ where
 pub struct DecryptOutcome {
     pub output: PathBuf,
     pub skipped_identity_files: Vec<PathBuf>,
+    pub recipient_key_expired: bool,
+    pub signer_key_expired: bool,
 }
 
 pub fn decrypt_file_with_diagnostics<F>(
@@ -42,14 +44,28 @@ where
 
     let mut input_file = File::open(&args.input)?;
     let encrypted_len = input_file.metadata()?.len();
-    verify_signature_policy(args, &mut input_file, encrypted_len)?;
+    let verification_key = resolve_verification_key(args)?;
+    let signer_key_expired = verification_key
+        .as_ref()
+        .is_some_and(keys::SigningPublicKeyBundle::is_expired);
+    verify_signature_policy(
+        args,
+        verification_key.as_ref(),
+        &mut input_file,
+        encrypted_len,
+    )?;
     input_file.seek(SeekFrom::Start(0))?;
     let (identities, skipped_identity_files) = resolve_identities(args)?;
+    let recipient_key_expired = args.identity.is_some()
+        && identities
+            .first()
+            .is_some_and(keys::RecipientSecretKeyBundle::is_expired);
 
     decrypt_open_file(
         input_file,
         encrypted_len,
         &identities,
+        verification_key.as_ref(),
         &output,
         args.force,
         on_progress,
@@ -57,6 +73,8 @@ where
     Ok(DecryptOutcome {
         output,
         skipped_identity_files,
+        recipient_key_expired,
+        signer_key_expired,
     })
 }
 
@@ -64,6 +82,7 @@ fn decrypt_open_file<F>(
     input_file: File,
     encrypted_len: u64,
     identities: &[keys::RecipientSecretKeyBundle],
+    verification_key: Option<&keys::SigningPublicKeyBundle>,
     output: &std::path::Path,
     force: bool,
     on_progress: F,
@@ -74,11 +93,12 @@ where
     let output_dir = envelope::output_parent_dir(output);
     fs::create_dir_all(&output_dir)?;
     let mut temp_output = NamedTempFile::new_in(&output_dir)?;
+    let metadata;
     {
         let mut reader = BufReader::with_capacity(DEFAULT_CHUNK_SIZE.max(64 * 1024), input_file);
         let mut writer =
             BufWriter::with_capacity(DEFAULT_CHUNK_SIZE.max(64 * 1024), temp_output.as_file_mut());
-        opaque::decrypt_pqc_stream(
+        metadata = opaque::decrypt_pqc_stream(
             &mut reader,
             &mut writer,
             encrypted_len,
@@ -88,8 +108,23 @@ where
         writer.flush()?;
     }
 
+    enforce_signature_requirement(&metadata, verification_key)?;
     temp_output.as_file_mut().sync_all()?;
     envelope::persist_temp_file(temp_output, output, force)
+}
+
+fn enforce_signature_requirement(
+    metadata: &opaque::PqcDecryptMetadata,
+    verification_key: Option<&keys::SigningPublicKeyBundle>,
+) -> Result<()> {
+    let Some(required_signer_key_id) = &metadata.required_signer_key_id else {
+        return Ok(());
+    };
+    let verification_key = verification_key.ok_or(AppError::SignatureVerificationKeyRequired)?;
+    if verification_key.key_id != *required_signer_key_id {
+        return Err(AppError::SignatureVerificationFailed);
+    }
+    Ok(())
 }
 
 fn resolve_identities(
@@ -110,17 +145,37 @@ fn resolve_identities(
 
 fn verify_signature_policy(
     args: &AssymDecryptArgs,
+    verification_key: Option<&keys::SigningPublicKeyBundle>,
     input_file: &mut File,
     encrypted_len: u64,
 ) -> Result<()> {
-    if args.verify.is_none() && !args.require_signature {
-        return Ok(());
+    if let Some(verification_key) = verification_key {
+        return sign::verify_detached_signature(
+            &args.input,
+            verification_key,
+            input_file,
+            encrypted_len,
+        );
     }
-    let verify_key = args
-        .verify
-        .as_ref()
-        .ok_or(AppError::SignatureVerificationKeyRequired)?;
-    sign::verify_detached_signature(&args.input, verify_key, input_file, encrypted_len)
+    Ok(())
+}
+
+fn resolve_verification_key(
+    args: &AssymDecryptArgs,
+) -> Result<Option<keys::SigningPublicKeyBundle>> {
+    if let Some(verify_key) = &args.verify {
+        return keys::read_signing_public_key(verify_key).map(Some);
+    }
+    if args.require_signature {
+        return Err(AppError::SignatureVerificationKeyRequired);
+    }
+
+    let detached_path = envelope::detached_signature_path(&args.input)?;
+    match fs::symlink_metadata(detached_path) {
+        Ok(_) => Err(AppError::SignatureVerificationKeyRequired),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(AppError::Io(error)),
+    }
 }
 
 #[cfg(all(test, feature = "pqc", unix))]
@@ -204,8 +259,19 @@ mod tests {
             .metadata()
             .expect("ciphertext metadata must read")
             .len();
-        verify_signature_policy(&args, &mut verified_file, encrypted_len)
-            .expect("original open file must verify");
+        let verification_key = keys::read_signing_public_key(
+            args.verify
+                .as_ref()
+                .expect("verification key path must exist"),
+        )
+        .expect("verification key must load");
+        verify_signature_policy(
+            &args,
+            Some(&verification_key),
+            &mut verified_file,
+            encrypted_len,
+        )
+        .expect("original open file must verify");
 
         fs::rename(&replacement, &encrypted).expect("path must be replaced after verification");
         let identities = vec![keys::read_recipient_secret_key(&recipient_secret)
@@ -214,6 +280,7 @@ mod tests {
             verified_file,
             encrypted_len,
             &identities,
+            Some(&verification_key),
             &output,
             false,
             |_| {},

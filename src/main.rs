@@ -287,20 +287,6 @@ fn run_decrypt(args: DecryptArgs, config: &CryptoConfig, options: OutputOptions)
         )
     } else {
         let mut warnings = Vec::new();
-        if let Some(identity) = &args.identity {
-            if asym::keys::read_recipient_secret_key(identity)?.is_expired() {
-                warnings
-                    .push("recipient key is expired; using it for archival decryption".to_string());
-            }
-        }
-        if let Some(verify) = &args.verify {
-            if asym::keys::read_signing_public_key(verify)?.is_expired() {
-                warnings.push(
-                    "signing key is expired; historical signature verification is allowed"
-                        .to_string(),
-                );
-            }
-        }
         let asym_args = AssymDecryptArgs {
             input: input.clone(),
             output: Some(output.clone()),
@@ -315,6 +301,14 @@ fn run_decrypt(args: DecryptArgs, config: &CryptoConfig, options: OutputOptions)
         let result = asym::decrypt::decrypt_file_with_diagnostics(&asym_args, |n| pb.inc(n));
         pb.finish();
         let outcome = result?;
+        if outcome.recipient_key_expired {
+            warnings.push("recipient key is expired; using it for archival decryption".to_string());
+        }
+        if outcome.signer_key_expired {
+            warnings.push(
+                "signing key is expired; historical signature verification is allowed".to_string(),
+            );
+        }
         warnings.extend(
             outcome
                 .skipped_identity_files

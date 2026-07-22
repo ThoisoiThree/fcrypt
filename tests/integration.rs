@@ -979,6 +979,24 @@ fn recipient_key_auto_discovery_is_bounded_before_parsing_keys() {
     ));
 }
 
+#[test]
+fn oversized_asymmetric_key_file_is_rejected_before_json_parsing() {
+    let dir = tempdir().expect("tempdir must be created");
+    let key = dir.path().join("oversized_recipient_default.pub");
+    fs::write(
+        &key,
+        vec![b' '; keys::MAX_ASYMMETRIC_KEY_FILE_BYTES as usize + 1],
+    )
+    .expect("oversized key fixture must be written");
+
+    let err = keys::read_recipient_public_key(&key)
+        .expect_err("oversized key files must be rejected before parsing");
+    assert!(matches!(
+        err,
+        AppError::InvalidAsymmetricKeyFile(message) if message.contains("exceeds")
+    ));
+}
+
 #[cfg(feature = "pqc")]
 #[test]
 fn asymmetric_roundtrip_with_generated_identity() {
@@ -1069,6 +1087,26 @@ fn asymmetric_roundtrip_with_detached_signature_verification() {
     assert_key_name(&signer_secret, "_signer_mldsa87.sec");
     assert!(detached_signature.exists());
 
+    let unverified_output = dir.path().join("signed.unverified.out");
+    let unverified_err = asym::decrypt::decrypt_file(
+        &AssymDecryptArgs {
+            input: outcome.output.clone(),
+            output: Some(unverified_output.clone()),
+            identity: Some(recipient_secret.clone()),
+            keys_dir: None,
+            verify: None,
+            require_signature: false,
+            force: false,
+        },
+        |_| {},
+    )
+    .expect_err("an existing detached signature must not be silently ignored");
+    assert!(matches!(
+        unverified_err,
+        AppError::SignatureVerificationKeyRequired
+    ));
+    assert!(!unverified_output.exists());
+
     let decrypt_args = AssymDecryptArgs {
         input: outcome.output,
         output: Some(decrypted.clone()),
@@ -1084,6 +1122,91 @@ fn asymmetric_roundtrip_with_detached_signature_verification() {
         fs::read(decrypted).expect("decrypted output must be readable"),
         original
     );
+
+    fs::remove_file(detached_signature).expect("detached signature must be removable");
+    let stripped_output = dir.path().join("signed.stripped.out");
+    let stripped_err = asym::decrypt::decrypt_file(
+        &AssymDecryptArgs {
+            input: decrypt_args.input,
+            output: Some(stripped_output.clone()),
+            identity: decrypt_args.identity,
+            keys_dir: None,
+            verify: None,
+            require_signature: false,
+            force: false,
+        },
+        |_| {},
+    )
+    .expect_err("authenticated signing intent must detect a removed detached signature");
+    assert!(matches!(
+        stripped_err,
+        AppError::SignatureVerificationKeyRequired
+    ));
+    assert!(!stripped_output.exists());
+}
+
+#[cfg(feature = "pqc")]
+#[test]
+fn oversized_detached_signature_is_rejected_before_json_parsing() {
+    let dir = tempdir().expect("tempdir must be created");
+    let generated = keys::generate_named_key_pair_files(dir.path(), "signature-limit", None, false)
+        .expect("key pair must be generated");
+    let input = dir.path().join("ciphertext.bin");
+    let signature = dir.path().join("ciphertext.bin.sig");
+    fs::write(&input, b"ciphertext").expect("input must be written");
+    fs::write(
+        &signature,
+        vec![b' '; asym::sign::MAX_DETACHED_SIGNATURE_FILE_BYTES as usize + 1],
+    )
+    .expect("oversized signature fixture must be written");
+
+    let err = match asym::sign::verify_file(&input, &generated.signing_public_path) {
+        Ok(_) => panic!("oversized detached signatures must be rejected before parsing"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        err,
+        AppError::InvalidAsymmetricFile(message) if message.contains("exceeds")
+    ));
+}
+
+#[cfg(feature = "pqc")]
+#[test]
+fn signed_asymmetric_encryption_keeps_existing_ciphertext_when_signature_publish_fails() {
+    let dir = tempdir().expect("tempdir must be created");
+    let generated = keys::generate_named_key_pair_files(dir.path(), "transaction", None, false)
+        .expect("key pair must be generated");
+    let input = dir.path().join("input.txt");
+    let output = dir.path().join("output.bin");
+    let signature = dir.path().join("output.bin.sig");
+    let previous_ciphertext = b"previous ciphertext";
+    fs::write(&input, deterministic_bytes(96)).expect("input must be written");
+    fs::write(&output, previous_ciphertext).expect("existing ciphertext must be written");
+    fs::create_dir(&signature).expect("blocking signature directory must be created");
+
+    let err = match asym::encrypt::encrypt_file(
+        &AssymEncryptArgs {
+            input,
+            output: Some(output.clone()),
+            recipient_public: Some(generated.recipient_public_path),
+            keys_dir: None,
+            sign: false,
+            sign_key: Some(generated.signing_secret_path),
+            force: true,
+        },
+        &test_config(48),
+        |_| {},
+    ) {
+        Ok(_) => panic!("ciphertext and signature must be published as one transaction"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(err, AppError::Io(_)));
+    assert_eq!(
+        fs::read(&output).expect("existing ciphertext must remain readable"),
+        previous_ciphertext
+    );
+    assert!(signature.is_dir());
 }
 
 #[cfg(feature = "pqc")]

@@ -1,6 +1,6 @@
 use serde::Serialize;
 use std::fs::File;
-use std::io::{BufReader, Read, Seek, SeekFrom};
+use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use crate::asym::cli::AssymSignArgs;
@@ -9,6 +9,7 @@ use crate::error::{AppError, Result};
 use crate::sym::pathing;
 
 const OPAQUE_SIGNATURE_DOMAIN: &str = "fcrypt opaque detached signature v1";
+pub const MAX_DETACHED_SIGNATURE_FILE_BYTES: u64 = 64 * 1024;
 
 pub struct SignOutcome {
     pub output: PathBuf,
@@ -89,7 +90,7 @@ where
 
 pub(crate) fn verify_detached_signature<R>(
     input_path: &Path,
-    verify_key: &Path,
+    public_key: &keys::SigningPublicKeyBundle,
     reader: &mut R,
     input_len: u64,
 ) -> Result<()>
@@ -97,19 +98,7 @@ where
     R: Read + Seek,
 {
     pqc::ensure_enabled()?;
-    let public_key = keys::read_signing_public_key(verify_key)?;
-    let detached_path = envelope::detached_signature_path(input_path)?;
-    if !detached_path.exists() {
-        return Err(AppError::SignatureRequired);
-    }
-    let file = File::open(&detached_path)?;
-    let detached: envelope::DetachedSignature = serde_json::from_reader(BufReader::new(file))
-        .map_err(|e| {
-            AppError::InvalidAsymmetricFile(format!(
-                "invalid detached signature {}: {e}",
-                detached_path.display()
-            ))
-        })?;
+    let detached = read_detached_signature(input_path)?;
     let signature = envelope::detached_signature_to_section(detached)?;
     if signature.signer_key_id != public_key.key_id {
         return Err(AppError::SignatureVerificationFailed);
@@ -129,11 +118,47 @@ pub fn verify_file(input: &Path, verify_key: &Path) -> Result<VerifyOutcome> {
     let signer_key_expired = public_key.is_expired();
     let mut file = File::open(input)?;
     let input_len = file.metadata()?.len();
-    verify_detached_signature(input, verify_key, &mut file, input_len)?;
+    verify_detached_signature(input, &public_key, &mut file, input_len)?;
     Ok(VerifyOutcome {
         signer_key_id,
         signer_key_expired,
     })
+}
+
+fn read_detached_signature(input_path: &Path) -> Result<envelope::DetachedSignature> {
+    let detached_path = envelope::detached_signature_path(input_path)?;
+    let file = match File::open(&detached_path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(AppError::SignatureRequired)
+        }
+        Err(error) => return Err(AppError::Io(error)),
+    };
+    let file_len = file.metadata()?.len();
+    if file_len > MAX_DETACHED_SIGNATURE_FILE_BYTES {
+        return Err(detached_signature_too_large(&detached_path));
+    }
+    let capacity = usize::try_from(file_len).unwrap_or(MAX_DETACHED_SIGNATURE_FILE_BYTES as usize);
+    let mut bytes = Vec::with_capacity(capacity);
+    file.take(MAX_DETACHED_SIGNATURE_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_DETACHED_SIGNATURE_FILE_BYTES {
+        return Err(detached_signature_too_large(&detached_path));
+    }
+    serde_json::from_slice(&bytes).map_err(|error| {
+        AppError::InvalidAsymmetricFile(format!(
+            "invalid detached signature {}: {error}",
+            detached_path.display()
+        ))
+    })
+}
+
+fn detached_signature_too_large(path: &Path) -> AppError {
+    AppError::InvalidAsymmetricFile(format!(
+        "detached signature {} exceeds the {} byte limit",
+        path.display(),
+        MAX_DETACHED_SIGNATURE_FILE_BYTES
+    ))
 }
 
 pub(crate) fn write_detached_signature(
@@ -141,7 +166,15 @@ pub(crate) fn write_detached_signature(
     output: &Path,
     force: bool,
 ) -> Result<()> {
-    keys::write_json_atomic(output, detached, false, force)
+    let staged = stage_detached_signature(detached, output)?;
+    envelope::persist_staged_files(vec![staged], force)
+}
+
+pub(crate) fn stage_detached_signature(
+    detached: &envelope::DetachedSignature,
+    output: &Path,
+) -> Result<envelope::StagedFile> {
+    keys::stage_json_file(output, detached, false)
 }
 
 fn detached_signature_from_transcript(

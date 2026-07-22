@@ -56,6 +56,11 @@ const MLKEM1024_CT_LEN: usize = 1568;
 const HQC256_CT_LEN: usize = 14421;
 const PQC_WRAP_OFFSET: usize = MLKEM1024_CT_LEN + HQC256_CT_LEN;
 const PQC_SLOT_MIN_LEN: usize = PQC_WRAP_OFFSET + SLOT_CIPHERTEXT_LEN;
+const SIGNATURE_REQUIREMENT_OFFSET: usize = 19 + KEY_LEN;
+const SIGNATURE_REQUIREMENT_MARKER: &[u8; 13] = b"fcrypt-sig-v1";
+const SIGNER_KEY_ID_LEN: usize = 32;
+const SIGNER_KEY_ID_OFFSET: usize =
+    SIGNATURE_REQUIREMENT_OFFSET + SIGNATURE_REQUIREMENT_MARKER.len();
 
 type HkdfSha3_512 = Hkdf<Sha3_512>;
 
@@ -85,6 +90,15 @@ struct OpenedPrelude {
     manifest_ciphertext: Vec<u8>,
     manifest: ManifestV1,
     payload_offset: u64,
+}
+
+pub struct PqcDecryptMetadata {
+    pub required_signer_key_id: Option<String>,
+}
+
+struct OpenedPqcSlot {
+    manifest_key: Zeroizing<[u8; KEY_LEN]>,
+    required_signer_key_id: Option<String>,
 }
 
 pub fn expected_payload_len(plaintext_len: u64, chunk_size: usize) -> Result<u64> {
@@ -223,8 +237,36 @@ where
     W: Write,
     F: FnMut(u64),
 {
+    encrypt_pqc_stream_with_signer(
+        reader,
+        writer,
+        plaintext_len,
+        recipient,
+        None,
+        config,
+        on_progress,
+    )
+}
+
+pub fn encrypt_pqc_stream_with_signer<R, W, F>(
+    reader: &mut R,
+    writer: &mut W,
+    plaintext_len: u64,
+    recipient: &keys::RecipientPublicKeyBundle,
+    required_signer_key_id: Option<&str>,
+    config: &CryptoConfig,
+    on_progress: F,
+) -> Result<()>
+where
+    R: Read,
+    W: Write,
+    F: FnMut(u64),
+{
     pqc::ensure_enabled()?;
     validate_chunk_size(config.chunk_size)?;
+    let required_signer_key_id = required_signer_key_id
+        .map(decode_signer_key_id)
+        .transpose()?;
 
     let mut file_nonce = [0u8; FILE_NONCE_LEN];
     let mut manifest_key = Zeroizing::new([0u8; KEY_LEN]);
@@ -255,6 +297,7 @@ where
         &file_nonce,
         &manifest_key,
         recipient,
+        required_signer_key_id.as_ref(),
     )?;
 
     writer.write_all(&file_nonce)?;
@@ -281,7 +324,7 @@ pub fn decrypt_pqc_stream<R, W, F>(
     encrypted_len: u64,
     identities: &[keys::RecipientSecretKeyBundle],
     mut on_progress: F,
-) -> Result<()>
+) -> Result<PqcDecryptMetadata>
 where
     R: Read,
     W: Write,
@@ -293,11 +336,11 @@ where
 
     let prelude = read_prelude(reader, encrypted_len)
         .map_err(|_| AppError::AsymmetricAuthenticationFailed)?;
-    let manifest_key = open_pqc_slots(&prelude.slots, &prelude.file_nonce, identities)?;
+    let opened_slot = open_pqc_slots(&prelude.slots, &prelude.file_nonce, identities)?;
     let opened = open_prelude_with_manifest_key(
         prelude.file_nonce,
         prelude.manifest_ciphertext,
-        &manifest_key,
+        &opened_slot.manifest_key,
     )
     .map_err(|_| AppError::AsymmetricAuthenticationFailed)?;
     on_progress(PRELUDE_LEN as u64);
@@ -308,7 +351,10 @@ where
         opened,
         AuthFailure::Pqc,
         on_progress,
-    )
+    )?;
+    Ok(PqcDecryptMetadata {
+        required_signer_key_id: opened_slot.required_signer_key_id,
+    })
 }
 
 struct RawPrelude {
@@ -426,6 +472,7 @@ fn seal_pqc_slot(
     file_nonce: &[u8; FILE_NONCE_LEN],
     manifest_key: &[u8; KEY_LEN],
     recipient: &keys::RecipientPublicKeyBundle,
+    required_signer_key_id: Option<&[u8; SIGNER_KEY_ID_LEN]>,
 ) -> Result<()> {
     if slot.len() < PQC_SLOT_MIN_LEN {
         return Err(AppError::InputTooLarge);
@@ -463,6 +510,12 @@ fn seal_pqc_slot(
     )?;
     let aad = slot_aad(b"pqc", file_nonce, slot_index, &slot[..PQC_WRAP_OFFSET]);
     let mut body = build_slot_body(ROLE_PQC, manifest_key);
+    if let Some(signer_key_id) = required_signer_key_id {
+        body[SIGNATURE_REQUIREMENT_OFFSET..SIGNER_KEY_ID_OFFSET]
+            .copy_from_slice(SIGNATURE_REQUIREMENT_MARKER);
+        body[SIGNER_KEY_ID_OFFSET..SIGNER_KEY_ID_OFFSET + SIGNER_KEY_ID_LEN]
+            .copy_from_slice(signer_key_id);
+    }
     let cipher =
         Aes256Gcm::new_from_slice(slot_key.as_ref()).map_err(|_| AppError::EncryptionFailed)?;
     let ciphertext = cipher
@@ -486,7 +539,7 @@ fn open_pqc_slots(
     slots: &[u8],
     file_nonce: &[u8; FILE_NONCE_LEN],
     identities: &[keys::RecipientSecretKeyBundle],
-) -> Result<Zeroizing<[u8; KEY_LEN]>> {
+) -> Result<OpenedPqcSlot> {
     for identity in identities {
         let mlkem_secret = identity.mlkem1024_secret_bytes()?;
         let hqc_secret = identity.hqc256_secret_bytes()?;
@@ -508,8 +561,8 @@ fn open_pqc_slots(
             );
             mlkem_ss.zeroize();
             hqc_ss.zeroize();
-            if let Some(key) = result? {
-                return Ok(key);
+            if let Some(opened) = result? {
+                return Ok(opened);
             }
         }
     }
@@ -524,7 +577,7 @@ fn open_pqc_slot_body(
     mlkem_ss: &[u8],
     hqc_ct: &[u8],
     hqc_ss: &[u8],
-) -> Result<Option<Zeroizing<[u8; KEY_LEN]>>> {
+) -> Result<Option<OpenedPqcSlot>> {
     let slot_key = derive_pqc_slot_key(
         file_nonce,
         slot_index,
@@ -556,9 +609,32 @@ fn open_pqc_slot_body(
     ) else {
         return Ok(None);
     };
-    let parsed = parse_slot_body(&body, ROLE_PQC);
+    let parsed = parse_pqc_slot_body(&body);
     body.zeroize();
     Ok(parsed)
+}
+
+fn parse_pqc_slot_body(body: &[u8]) -> Option<OpenedPqcSlot> {
+    let manifest_key = parse_slot_body(body, ROLE_PQC)?;
+    let required_signer_key_id = (&body[SIGNATURE_REQUIREMENT_OFFSET..SIGNER_KEY_ID_OFFSET]
+        == SIGNATURE_REQUIREMENT_MARKER)
+        .then(|| {
+            hex::encode(&body[SIGNER_KEY_ID_OFFSET..SIGNER_KEY_ID_OFFSET + SIGNER_KEY_ID_LEN])
+        });
+    Some(OpenedPqcSlot {
+        manifest_key,
+        required_signer_key_id,
+    })
+}
+
+fn decode_signer_key_id(key_id: &str) -> Result<[u8; SIGNER_KEY_ID_LEN]> {
+    let mut bytes = [0u8; SIGNER_KEY_ID_LEN];
+    hex::decode_to_slice(key_id, &mut bytes).map_err(|_| {
+        AppError::InvalidAsymmetricKeyFile(
+            "signing key_id must contain exactly 64 hexadecimal characters".to_string(),
+        )
+    })?;
+    Ok(bytes)
 }
 
 fn build_slot_body(role: u8, manifest_key: &[u8; KEY_LEN]) -> [u8; SLOT_BODY_LEN] {

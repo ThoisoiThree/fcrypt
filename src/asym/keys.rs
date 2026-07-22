@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 use std::fmt;
 use std::fs;
-use std::io::{BufReader, BufWriter, Write};
+use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tempfile::NamedTempFile;
@@ -19,6 +19,7 @@ use std::os::unix::fs::PermissionsExt;
 
 const RECIPIENT_MODE: &str = "default";
 pub const MAX_AUTO_DISCOVERED_RECIPIENT_IDENTITIES: usize = 32;
+pub const MAX_ASYMMETRIC_KEY_FILE_BYTES: u64 = 64 * 1024;
 
 pub struct RecipientSecretKeyLoad {
     pub identities: Vec<RecipientSecretKeyBundle>,
@@ -298,8 +299,11 @@ pub fn generate_recipient_key_files(
 
     let public_path = keys_dir.join(format!("{label8}_recipient_default.pub"));
     let secret_path = keys_dir.join(format!("{label8}_recipient_default.sec"));
-    write_json_atomic(&public_path, &public, false, force)?;
-    write_json_atomic(&secret_path, &secret, true, force)?;
+    let staged_files = vec![
+        stage_json_file(&public_path, &public, false)?,
+        stage_json_file(&secret_path, &secret, true)?,
+    ];
+    envelope::persist_staged_files(staged_files, force)?;
 
     Ok(GeneratedRecipientKeys {
         public,
@@ -342,8 +346,11 @@ pub fn generate_signing_key_files(keys_dir: &Path, force: bool) -> Result<Genera
 
     let public_path = keys_dir.join(format!("{label8}_signer_mldsa87.pub"));
     let secret_path = keys_dir.join(format!("{label8}_signer_mldsa87.sec"));
-    write_json_atomic(&public_path, &public, false, force)?;
-    write_json_atomic(&secret_path, &secret, true, force)?;
+    let staged_files = vec![
+        stage_json_file(&public_path, &public, false)?,
+        stage_json_file(&secret_path, &secret, true)?,
+    ];
+    envelope::persist_staged_files(staged_files, force)?;
 
     Ok(GeneratedSigningKeys {
         public,
@@ -443,7 +450,7 @@ pub fn generate_named_key_pair_files(
         stage_json_file(&signing_public_path, &signing_public, false)?,
         stage_json_file(&signing_secret_path, &signing_secret, true)?,
     ];
-    persist_staged_json_files(staged_files, force)?;
+    envelope::persist_staged_files(staged_files, force)?;
 
     Ok(GeneratedKeyPair {
         recipient_public_path,
@@ -575,15 +582,14 @@ pub fn write_json_atomic<T: Serialize>(
 ) -> Result<()> {
     preflight_output_paths(&[path], force)?;
     let staged = stage_json_file(path, value, secret)?;
-    persist_staged_json_files(vec![staged], force)
+    envelope::persist_staged_files(vec![staged], force)
 }
 
-struct StagedJsonFile {
-    path: PathBuf,
-    temp: NamedTempFile,
-}
-
-fn stage_json_file<T: Serialize>(path: &Path, value: &T, secret: bool) -> Result<StagedJsonFile> {
+pub(crate) fn stage_json_file<T: Serialize>(
+    path: &Path,
+    value: &T,
+    secret: bool,
+) -> Result<envelope::StagedFile> {
     let dir = path
         .parent()
         .map(Path::to_path_buf)
@@ -605,10 +611,7 @@ fn stage_json_file<T: Serialize>(path: &Path, value: &T, secret: bool) -> Result
     }
 
     temp.as_file_mut().sync_all()?;
-    Ok(StagedJsonFile {
-        path: path.to_path_buf(),
-        temp,
-    })
+    Ok(envelope::StagedFile::new(temp, path))
 }
 
 fn preflight_output_paths(paths: &[&Path], force: bool) -> Result<()> {
@@ -619,72 +622,6 @@ fn preflight_output_paths(paths: &[&Path], force: bool) -> Result<()> {
         return Err(AppError::OutputExists((*path).to_path_buf()));
     }
     Ok(())
-}
-
-fn persist_staged_json_files(files: Vec<StagedJsonFile>, force: bool) -> Result<()> {
-    let mut pending = Vec::with_capacity(files.len());
-    for staged in files {
-        let backup = if force {
-            stage_backup(&staged.path)?
-        } else {
-            None
-        };
-        pending.push((staged, backup));
-    }
-
-    let mut committed: Vec<(PathBuf, Option<NamedTempFile>)> = Vec::new();
-    for (staged, backup) in pending {
-        let path = staged.path.clone();
-        let result = if force {
-            staged.temp.persist(&path)
-        } else {
-            staged.temp.persist_noclobber(&path)
-        };
-        if let Err(error) = result {
-            for (committed_path, backup) in committed {
-                restore_backup(&committed_path, backup);
-            }
-            return Err(if error.error.kind() == std::io::ErrorKind::AlreadyExists {
-                AppError::OutputExists(path)
-            } else {
-                AppError::Io(error.error)
-            });
-        }
-        committed.push((path, backup));
-    }
-    Ok(())
-}
-
-fn stage_backup(path: &Path) -> Result<Option<NamedTempFile>> {
-    if !path.exists() {
-        return Ok(None);
-    }
-    let metadata = fs::metadata(path)?;
-    if !metadata.is_file() {
-        return Ok(None);
-    }
-    let dir = path
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
-    let mut backup = NamedTempFile::new_in(dir)?;
-    fs::copy(path, backup.path())?;
-    backup
-        .as_file_mut()
-        .set_permissions(metadata.permissions())?;
-    backup.as_file_mut().sync_all()?;
-    Ok(Some(backup))
-}
-
-fn restore_backup(path: &Path, backup: Option<NamedTempFile>) {
-    match backup {
-        Some(backup) => {
-            let _ = backup.persist(path);
-        }
-        None => {
-            let _ = fs::remove_file(path);
-        }
-    }
 }
 
 fn prepare_keys_dir(keys_dir: &Path) -> Result<()> {
@@ -711,8 +648,27 @@ fn prepare_keys_dir(keys_dir: &Path) -> Result<()> {
 
 fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
     let file = fs::File::open(path)?;
-    serde_json::from_reader(BufReader::new(file))
+    let file_len = file.metadata()?.len();
+    if file_len > MAX_ASYMMETRIC_KEY_FILE_BYTES {
+        return Err(key_file_too_large(path));
+    }
+    let capacity = usize::try_from(file_len).unwrap_or(MAX_ASYMMETRIC_KEY_FILE_BYTES as usize);
+    let mut bytes = Zeroizing::new(Vec::with_capacity(capacity));
+    file.take(MAX_ASYMMETRIC_KEY_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_ASYMMETRIC_KEY_FILE_BYTES {
+        return Err(key_file_too_large(path));
+    }
+    serde_json::from_slice(&bytes)
         .map_err(|e| AppError::InvalidAsymmetricKeyFile(format!("{}: {e}", path.display())))
+}
+
+fn key_file_too_large(path: &Path) -> AppError {
+    AppError::InvalidAsymmetricKeyFile(format!(
+        "{} exceeds the {} byte limit",
+        path.display(),
+        MAX_ASYMMETRIC_KEY_FILE_BYTES
+    ))
 }
 
 fn validate_recipient_public_key(bundle: &RecipientPublicKeyBundle) -> Result<()> {

@@ -97,11 +97,12 @@ where
             .ok_or(AppError::InputTooLarge)?
             .max(64 * 1024);
         let mut writer = BufWriter::with_capacity(writer_capacity, temp_output.as_file_mut());
-        opaque::encrypt_pqc_stream(
+        opaque::encrypt_pqc_stream_with_signer(
             &mut reader,
             &mut writer,
             plaintext_len,
             &recipient,
+            signer.as_ref().map(|signer| signer.key_id.as_str()),
             config,
             on_progress,
         )?;
@@ -118,12 +119,16 @@ where
     } else {
         None
     };
-    envelope::persist_temp_file(temp_output, &output, args.force)?;
+    let mut staged_files = vec![envelope::StagedFile::new(temp_output, &output)];
     if let (Some(signature), Some(detached_signature)) =
         (prepared_signature.as_ref(), detached_signature.as_ref())
     {
-        sign::write_detached_signature(signature, detached_signature, args.force)?;
+        staged_files.push(sign::stage_detached_signature(
+            signature,
+            detached_signature,
+        )?);
     }
+    envelope::persist_staged_files(staged_files, args.force)?;
 
     Ok(EncryptOutcome {
         output,

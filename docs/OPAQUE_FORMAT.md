@@ -37,6 +37,16 @@ ML-KEM-1024 and HQC-256 ciphertexts followed by an AEAD-wrapped manifest key.
 Empty slots are random bytes. The reader tries the supplied password or
 available recipient secret keys against every slot.
 
+For signed PQC containers, the AEAD-protected padding of the matching recipient
+slot carries a `fcrypt-sig-v1` marker and the 32-byte signer key ID. This is a
+backward-compatible opaque v1 extension: it does not change slot sizes, nonces,
+AAD, or manifest fields, and older readers ignore the padding. A current reader
+uses the marker to require the matching detached signature and verification key
+before publishing plaintext, so removing `.sig` cannot downgrade a newly
+signed container to unauthenticated decryption. Signed containers created
+before this extension have no authenticated marker and retain their original
+behavior when the sidecar has been removed.
+
 Payload chunks use AES-256-GCM. Chunk nonces are:
 
 ```text
