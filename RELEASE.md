@@ -5,10 +5,14 @@
 1. Ensure `CHANGELOG.md` has a section for the new version.
 2. Bump `version` in `Cargo.toml`, root `package.json`, and every `npm/packages/*/package.json`.
 3. Run checks:
-   - `cargo fmt --check`
-   - `cargo clippy --all-targets --all-features -- -D warnings`
-   - `cargo test --locked`
+   - `cargo fmt --all -- --check`
+   - `cargo clippy --locked --all-targets --all-features -- -D warnings`
+   - `cargo clippy --locked --all-targets --no-default-features -- -D warnings`
+   - `cargo test --locked --all-features`
+   - `cargo test --locked --no-default-features`
    - `cargo build --release --locked`
+   - `cargo package --list`
+   - `cargo publish --dry-run --locked`
 
 ## 2. Create tag
 
@@ -31,7 +35,19 @@ After pushing a `v*` tag, GitHub Actions `release.yml` will:
 2. Attach raw binary files and SHA-256 checksum files.
 3. Publish a GitHub Release with attached artifacts.
 
-## 4. Package repositories
+## 4. crates.io
+
+Publishing to crates.io is manual and requires an authenticated Cargo session:
+
+1. Run `cargo login` and paste a crates.io API token when prompted.
+2. Publish the prepared version with `cargo publish --locked`.
+3. Verify the published package with `cargo info fcrypt` and
+   `cargo install fcrypt --locked`.
+
+Published crate versions cannot be overwritten or deleted. A broken version can
+only be yanked, so do not publish until the dry run and release checks pass.
+
+## 5. Package repositories
 
 GitHub Actions `packages.yml` can build and publish Linux package repositories:
 
@@ -49,7 +65,7 @@ Before enabling this workflow, configure GitHub Pages to use GitHub Actions and 
 
 Detailed setup and install commands are in `docs/PACKAGE_REPOSITORIES.md`.
 
-## 5. npm packages
+## 6. npm packages
 
 GitHub Actions `npm.yml` publishes:
 

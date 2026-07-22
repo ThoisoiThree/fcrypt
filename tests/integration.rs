@@ -10,19 +10,19 @@ use std::{
 use assert_cmd::Command as AssertCommand;
 use clap::Parser;
 #[cfg(feature = "pqc")]
-use filecrypt::asym;
-use filecrypt::asym::cli::AssymCommand;
+use fcrypt::asym;
+use fcrypt::asym::cli::AssymCommand;
 #[cfg(feature = "pqc")]
-use filecrypt::asym::cli::{AssymDecryptArgs, AssymEncryptArgs, AssymSignArgs};
-use filecrypt::asym::keys;
-use filecrypt::cli::{Cli, Command as CliCommand};
-use filecrypt::error::AppError;
-use filecrypt::format::opaque;
-use filecrypt::keygen::phrase;
-use filecrypt::sym::crypto::{CryptoConfig, TAG_LEN};
-use filecrypt::sym::file_ops::{decrypt_file, encrypt_file};
-use filecrypt::sym::overwrite::resolve_overwrite;
-use filecrypt::sym::pathing::{
+use fcrypt::asym::cli::{AssymDecryptArgs, AssymEncryptArgs, AssymSignArgs};
+use fcrypt::asym::keys;
+use fcrypt::cli::{Cli, Command as CliCommand};
+use fcrypt::error::AppError;
+use fcrypt::format::opaque;
+use fcrypt::keygen::phrase;
+use fcrypt::sym::crypto::{CryptoConfig, TAG_LEN};
+use fcrypt::sym::file_ops::{decrypt_file, encrypt_file};
+use fcrypt::sym::overwrite::resolve_overwrite;
+use fcrypt::sym::pathing::{
     asym_decryption_output_path, asym_default_keys_dir_for_encrypted_input,
     asym_default_keys_dir_for_plain_input, asym_encryption_output_path, decryption_output_path,
     encryption_output_path,
@@ -44,7 +44,7 @@ fn encrypt_decrypt_roundtrip_small_file() {
     let input = dir.path().join("small.bin");
     let encrypted = dir.path().join("small.bin.encdata");
     let decrypted = dir.path().join("small.bin.decoded");
-    let original = b"hello from filecrypt".to_vec();
+    let original = b"hello from fcrypt".to_vec();
     fs::write(&input, &original).expect("input file must be written");
 
     let config = test_config(1024);
@@ -78,7 +78,7 @@ fn encrypt_preflight_rejects_oversized_payload_before_writing() {
     let mut reader = std::io::empty();
     let mut writer = Vec::new();
 
-    let err = filecrypt::sym::crypto::encrypt_stream(
+    let err = fcrypt::sym::crypto::encrypt_stream(
         &mut reader,
         &mut writer,
         u64::MAX,
@@ -146,7 +146,7 @@ fn decrypt_stream_ignores_runtime_config_for_format_params() {
     let encrypt_config = test_config(19);
     let mut reader = std::io::Cursor::new(original.as_slice());
     let mut encrypted = Vec::new();
-    filecrypt::sym::crypto::encrypt_stream(
+    fcrypt::sym::crypto::encrypt_stream(
         &mut reader,
         &mut encrypted,
         original.len() as u64,
@@ -160,7 +160,7 @@ fn decrypt_stream_ignores_runtime_config_for_format_params() {
     let decrypt_config = CryptoConfig { chunk_size: 0 };
     let mut encrypted_reader = std::io::Cursor::new(encrypted);
     let mut decrypted = Vec::new();
-    filecrypt::sym::crypto::decrypt_stream(
+    fcrypt::sym::crypto::decrypt_stream(
         &mut encrypted_reader,
         &mut decrypted,
         encrypted_len,
@@ -449,9 +449,9 @@ fn password_file_preserves_spaces_and_removes_one_line_ending() {
     fs::write(&windows, b"  spaced password  \r\n").expect("password file must be written");
 
     let unix_password =
-        filecrypt::sym::password_file::read_password_file(&unix).expect("password file must read");
-    let windows_password = filecrypt::sym::password_file::read_password_file(&windows)
-        .expect("password file must read");
+        fcrypt::sym::password_file::read_password_file(&unix).expect("password file must read");
+    let windows_password =
+        fcrypt::sym::password_file::read_password_file(&windows).expect("password file must read");
     assert_eq!(unix_password.password.as_str(), "  spaced password  ");
     assert_eq!(windows_password.password.as_str(), "  spaced password  ");
 }
@@ -462,7 +462,7 @@ fn empty_password_file_is_rejected() {
     let password = dir.path().join("password");
     fs::write(&password, b"\n").expect("password file must be written");
 
-    let err = match filecrypt::sym::password_file::read_password_file(&password) {
+    let err = match fcrypt::sym::password_file::read_password_file(&password) {
         Ok(_) => panic!("empty password file must fail"),
         Err(err) => err,
     };
@@ -560,7 +560,7 @@ fn password_generate_supports_base64_and_compatible_output() {
     assert_eq!(password.len(), 256);
     assert!(password
         .iter()
-        .all(|byte| filecrypt::keygen::password::COMPATIBLE_PASSWORD_ALPHABET.contains(byte)));
+        .all(|byte| fcrypt::keygen::password::COMPATIBLE_PASSWORD_ALPHABET.contains(byte)));
 
     AssertCommand::cargo_bin("fcrypt")
         .expect("binary must build")
@@ -1291,7 +1291,7 @@ fn opaque_encryption_uses_fixed_prelude_without_legacy_magic() {
     assert_eq!(
         bytes.len() as u64,
         opaque::PRELUDE_LEN as u64
-            + filecrypt::sym::crypto::expected_ciphertext_payload_len(
+            + fcrypt::sym::crypto::expected_ciphertext_payload_len(
                 original.len() as u64,
                 config.chunk_size,
             )

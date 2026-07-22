@@ -1,14 +1,20 @@
 # Changelog
 
-- Added Base64 output (`-b64`/`--base64`) and a conservative `--compatible`
-  alphabet to random password generation.
-
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.3.2] - 2026-07-22
+
+### Added
+- Added Base64 output (`-b64`/`--base64`) and a conservative `--compatible` alphabet to random password generation.
+
+### Changed
+- Renamed the Cargo package and Rust crate from `filecrypt` to `fcrypt` so the package name matches the installed binary.
+- Updated npm package metadata and all platform package dependencies to `0.3.2`.
 
 ## [0.3.1] - 2026-07-10
 
@@ -99,7 +105,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Safe temp-file output workflow (finalize only after successful operation).
 - Integration tests for roundtrip, edge cases, corruption/truncation, and naming logic.
 
-[Unreleased]: https://github.com/ThoisoiThree/fcrypt/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/ThoisoiThree/fcrypt/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/ThoisoiThree/fcrypt/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/ThoisoiThree/fcrypt/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/ThoisoiThree/fcrypt/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/ThoisoiThree/fcrypt/compare/v0.1.2...v0.2.0

@@ -7,17 +7,17 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use filecrypt::asym;
-use filecrypt::asym::cli::{AssymCommand, AssymDecryptArgs, AssymEncryptArgs, AssymSignArgs};
-use filecrypt::cli::{
+use fcrypt::asym;
+use fcrypt::asym::cli::{AssymCommand, AssymDecryptArgs, AssymEncryptArgs, AssymSignArgs};
+use fcrypt::cli::{
     Cli, Command, DecryptArgs, EncryptArgs, IdentityCommand, KeygenCommand, PasswordCommand,
     PhraseCommand, SignArgs,
 };
-use filecrypt::error::{AppError, Result};
-use filecrypt::keygen;
-use filecrypt::output::{self, OperationReport, OutputOptions};
-use filecrypt::sym::crypto::CryptoConfig;
-use filecrypt::sym::{file_ops, overwrite, password_file, pathing, progress, prompt};
+use fcrypt::error::{AppError, Result};
+use fcrypt::keygen;
+use fcrypt::output::{self, OperationReport, OutputOptions};
+use fcrypt::sym::crypto::CryptoConfig;
+use fcrypt::sym::{file_ops, overwrite, password_file, pathing, progress, prompt};
 
 fn main() {
     let args = normalized_args();
@@ -598,7 +598,7 @@ fn run_legacy_asym(
     }
 }
 
-fn run_legacy_keygen(args: filecrypt::cli::KeygenArgs, options: OutputOptions) -> Result<()> {
+fn run_legacy_keygen(args: fcrypt::cli::KeygenArgs, options: OutputOptions) -> Result<()> {
     match args.command {
         Some(KeygenCommand::Phrase {
             word_count,

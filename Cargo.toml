@@ -1,5 +1,5 @@
 [package]
-name = "filecrypt"
+name = "fcrypt"
 version = "0.3.2"
 edition = "2021"
 rust-version = "1.74"
@@ -8,7 +8,7 @@ license = "MIT"
 readme = "README.md"
 repository = "https://github.com/ThoisoiThree/fcrypt"
 homepage = "https://github.com/ThoisoiThree/fcrypt"
-documentation = "https://docs.rs/filecrypt"
+documentation = "https://docs.rs/fcrypt"
 keywords = ["encryption", "cli", "aes-gcm", "argon2", "security"]
 categories = ["command-line-utilities", "cryptography"]
 autobins = false

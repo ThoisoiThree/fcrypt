@@ -3,7 +3,7 @@
 `fcrypt` is a cross-platform Rust CLI for local file encryption, decryption,
 key generation, and post-quantum asymmetric encryption.
 
-The crate name is `filecrypt`; the installed binary is `fcrypt`.
+The Cargo package, Rust crate, and installed binary are all named `fcrypt`.
 
 `fcrypt` is designed for large files. It processes data as authenticated
 chunks, writes outputs through temporary files, and finalizes results only after
@@ -87,6 +87,13 @@ A recipient key and a signing key are different keys:
 Never share `.sec` files.
 
 ## Install
+
+### Cargo
+
+```bash
+cargo install fcrypt --locked
+fcrypt --help
+```
 
 ### npm
 

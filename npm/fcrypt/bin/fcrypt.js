@@ -41,7 +41,7 @@ try {
 } catch (error) {
   exitWithError(
     `The platform package ${packageName} is not installed. ` +
-      'Reinstall @thoisoithree/fcrypt or install from Cargo with: cargo install filecrypt'
+      'Reinstall @thoisoithree/fcrypt or install from Cargo with: cargo install fcrypt'
   );
 }
 
