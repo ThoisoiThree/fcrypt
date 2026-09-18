@@ -169,34 +169,21 @@ fn run_pqc_encrypt(
         ));
     }
 
-    let mut generated_keys = Vec::new();
-    let mut recipient = args.recipient.clone();
-    let mut sign_key = args.sign_key.clone();
     let keys_dir = args
         .keys_dir
         .clone()
         .unwrap_or(pathing::asym_default_keys_dir_for_plain_input(&input)?);
-    if let Some(name) = &args.new_identity {
-        let key_force = resolve_named_key_overwrite(&keys_dir, name, args.force, options)?;
-        let generated =
-            asym::keys::generate_named_key_pair_files(&keys_dir, name, None, key_force)?;
-        recipient = Some(generated.recipient_public_path.clone());
-        if args.sign {
-            sign_key = Some(generated.signing_secret_path.clone());
-        }
-        generated_keys = vec![
-            generated.recipient_public_path,
-            generated.recipient_secret_path,
-            generated.signing_public_path,
-            generated.signing_secret_path,
-        ];
-    }
-    let recipient = recipient.ok_or_else(|| {
-        AppError::InvalidArgument(
+    let key_force = if let Some(name) = &args.new_identity {
+        resolve_named_key_overwrite(&keys_dir, name, args.force, options)?
+    } else {
+        false
+    };
+    if args.recipient.is_none() && args.new_identity.is_none() {
+        return Err(AppError::InvalidArgument(
             "asymmetric encryption requires --recipient or --new-identity".to_string(),
-        )
-    })?;
-    let signing = args.sign || sign_key.is_some();
+        ));
+    }
+    let signing = args.sign || args.sign_key.is_some();
     let detached_signature = signing
         .then(|| asym::envelope::detached_signature_path(&output))
         .transpose()?;
@@ -209,17 +196,32 @@ fn run_pqc_encrypt(
     let asym_args = AssymEncryptArgs {
         input: input.clone(),
         output: Some(output.clone()),
-        recipient_public: Some(recipient),
+        recipient_public: args.recipient,
         keys_dir: Some(keys_dir.clone()),
-        sign: signing,
-        sign_key,
+        sign: args.sign,
+        sign_key: args.sign_key,
         force: args.force || allow_overwrite || signature_overwrite,
     };
     let total = fs::metadata(&input)?.len();
     let pb = progress::create_progress(total, "Encrypting", progress_enabled(options));
-    let result = asym::encrypt::encrypt_file(&asym_args, config, |n| pb.inc(n));
+    let result = if let Some(name) = &args.new_identity {
+        asym::encrypt::encrypt_file_with_new_identity(&asym_args, name, key_force, config, |n| {
+            pb.inc(n)
+        })
+    } else {
+        asym::encrypt::encrypt_file(&asym_args, config, |n| pb.inc(n))
+    };
     pb.finish();
     let outcome = result?;
+    let generated_keys = [
+        outcome.generated_recipient_public,
+        outcome.generated_recipient_secret,
+        outcome.generated_signer_public,
+        outcome.generated_signer_secret,
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
     let mut report = OperationReport::new("encrypt");
     report.mode = Some("pqc");
     report.input = Some(input.display().to_string());
@@ -724,17 +726,10 @@ fn list_identities(keys_dir: &Path) -> Result<(Vec<KeyInfo>, Vec<String>)> {
 }
 
 fn inspect_key(path: &Path) -> Result<KeyInfo> {
-    let value: serde_json::Value = serde_json::from_slice(&fs::read(path)?).map_err(|error| {
-        AppError::InvalidAsymmetricKeyFile(format!("{}: {error}", path.display()))
-    })?;
-    let kind = value
-        .get("type")
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| {
-            AppError::InvalidAsymmetricKeyFile(format!("{}: missing key type", path.display()))
-        })?;
+    let metadata = asym::keys::read_key_metadata(path)?;
+    let kind = metadata.kind;
     if !matches!(
-        kind,
+        kind.as_str(),
         "recipient-public" | "recipient-secret" | "signer-public" | "signer-secret"
     ) {
         return Err(AppError::InvalidAsymmetricKeyFile(format!(
@@ -742,9 +737,7 @@ fn inspect_key(path: &Path) -> Result<KeyInfo> {
             path.display()
         )));
     }
-    let expires_at_unix = value
-        .get("expires_at_unix")
-        .and_then(|value| value.as_u64());
+    let expires_at_unix = metadata.expires_at_unix;
     let expired = expires_at_unix.is_some_and(|expires| {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -753,18 +746,10 @@ fn inspect_key(path: &Path) -> Result<KeyInfo> {
     });
     Ok(KeyInfo {
         path: path.display().to_string(),
-        kind: kind.to_string(),
-        label8: value
-            .get("label8")
-            .and_then(|value| value.as_str())
-            .map(ToOwned::to_owned),
-        key_id: value
-            .get("key_id")
-            .and_then(|value| value.as_str())
-            .map(ToOwned::to_owned),
-        created_at_unix: value
-            .get("created_at_unix")
-            .and_then(|value| value.as_u64()),
+        kind,
+        label8: metadata.label8,
+        key_id: metadata.key_id,
+        created_at_unix: metadata.created_at_unix,
         expires_at_unix,
         expired,
     })

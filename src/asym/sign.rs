@@ -42,6 +42,8 @@ pub fn sign_file(args: &AssymSignArgs) -> Result<SignOutcome> {
         ));
     }
 
+    let mut input = File::open(&args.input)?;
+    let input_len = input.metadata()?.len();
     let keys_dir = args
         .keys_dir
         .clone()
@@ -49,24 +51,25 @@ pub fn sign_file(args: &AssymSignArgs) -> Result<SignOutcome> {
         .unwrap_or_else(|| pathing::asym_default_keys_dir_for_encrypted_input(&args.input))?;
     let mut generated_signer_public = None;
     let mut generated_signer_secret = None;
+    let mut staged_files = Vec::new();
     let signer = if let Some(sign_key) = &args.sign_key {
         keys::read_signing_secret_key(sign_key)?
     } else {
-        let generated = keys::generate_signing_key_files(&keys_dir, args.force)?;
+        let (generated, files) = keys::prepare_signing_key_files(&keys_dir)?;
+        staged_files.extend(files);
         generated_signer_public = Some(generated.public_path);
         generated_signer_secret = Some(generated.secret_path);
         generated.secret
     };
 
-    let mut input = File::open(&args.input)?;
-    let input_len = input.metadata()?.len();
     let detached = create_detached_signature_from_reader(&mut input, input_len, &signer)?;
     let output = args
         .output
         .clone()
         .map(Ok)
         .unwrap_or_else(|| envelope::detached_signature_path(&args.input))?;
-    write_detached_signature(&detached, &output, args.force)?;
+    staged_files.push(stage_detached_signature(&detached, &output)?);
+    envelope::persist_staged_files(staged_files, args.force)?;
     Ok(SignOutcome {
         output,
         embedded: false,
@@ -159,15 +162,6 @@ fn detached_signature_too_large(path: &Path) -> AppError {
         path.display(),
         MAX_DETACHED_SIGNATURE_FILE_BYTES
     ))
-}
-
-pub(crate) fn write_detached_signature(
-    detached: &envelope::DetachedSignature,
-    output: &Path,
-    force: bool,
-) -> Result<()> {
-    let staged = stage_detached_signature(detached, output)?;
-    envelope::persist_staged_files(vec![staged], force)
 }
 
 pub(crate) fn stage_detached_signature(

@@ -34,7 +34,11 @@ To read old files created by `fcrypt` `0.2.0` or earlier, use `fcrypt` version
 - Random password generation and Diceware-style passphrase generation from the
   embedded EFF large wordlist.
 - Atomic output workflow: plaintext, ciphertext, signature, and key files are
-  written through temporary files first.
+  written through temporary files first. Keys generated during encryption or
+  signing are committed with the corresponding outputs; failures preserve
+  existing keys and outputs when rollback succeeds. If rollback fails, the
+  error reports retained recovery backup paths. Multi-file transactions do
+  not guarantee recovery after a process crash or power loss.
 - npm packages with prebuilt binaries for Linux, macOS, and Windows on x64 and
   arm64.
 
@@ -287,6 +291,11 @@ opaque recipient slot. Decryption therefore fails closed if `.sig` is removed,
 and also requires `--verify <signer.pub>` when the sidecar is present. Always
 pass `--verify` when authenticity of older containers is required; containers
 created before this marker cannot reveal that a sidecar was removed.
+
+Decryption with `--verify` copies ciphertext to a private temporary file, then
+verifies and decrypts that same snapshot. Concurrent changes to the original
+file cannot change the verified plaintext. This requires temporary disk space
+for one additional copy of the ciphertext, alongside the staged plaintext.
 
 ### Generate named recipient and signing keys
 
@@ -678,6 +687,8 @@ The test suite covers:
 - A signer `.sec` key can create signatures as that signer.
 - Use `--verify <signer.pub>` when authenticity is mandatory during decryption.
 - Asymmetric key JSON and detached signature files are limited to 64 KiB.
+- Opaque payload decryption uses the current chunk's actual length and rejects
+  ciphertext chunks above the 64 MiB reader memory limit before allocation.
 - Expired recipient secret keys remain usable for archival decryption, and
   expired signing public keys remain usable for historical verification. Expired
   recipient public keys and signing secret keys cannot be used for new work.

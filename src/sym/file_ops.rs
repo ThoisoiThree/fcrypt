@@ -23,8 +23,9 @@ where
 
     let input_file = File::open(input_path)?;
     let input_len = input_file.metadata()?.len();
-    let reader_capacity = config.chunk_size.max(64 * 1024);
-    let mut reader = BufReader::with_capacity(reader_capacity, input_file);
+    // The stream encryptor owns a zeroizing plaintext chunk buffer. Avoid a
+    // second, non-zeroizing plaintext copy in BufReader.
+    let mut reader = input_file;
 
     let output_dir = output_parent_dir(output_path);
     let mut temp_output = NamedTempFile::new_in(output_dir)?;
@@ -56,7 +57,7 @@ pub fn decrypt_file<F>(
     password: &str,
     config: &CryptoConfig,
     allow_overwrite: bool,
-    mut on_progress: F,
+    on_progress: F,
 ) -> Result<()>
 where
     F: FnMut(u64),
@@ -72,18 +73,16 @@ where
 
     let output_dir = output_parent_dir(output_path);
     let mut temp_output = NamedTempFile::new_in(output_dir)?;
-    {
-        let writer_capacity = config
-            .chunk_size
-            .checked_add(crypto::TAG_LEN)
-            .ok_or(AppError::InputTooLarge)?
-            .max(64 * 1024);
-        let mut writer = BufWriter::with_capacity(writer_capacity, temp_output.as_file_mut());
-        crypto::decrypt_stream(&mut reader, &mut writer, input_len, password, config, |n| {
-            on_progress(n)
-        })?;
-        writer.flush()?;
-    }
+    // Write plaintext directly to the staged file. The stream decryptor
+    // zeroizes its authenticated chunk before returning on every path.
+    crypto::decrypt_stream(
+        &mut reader,
+        temp_output.as_file_mut(),
+        input_len,
+        password,
+        config,
+        on_progress,
+    )?;
 
     temp_output.as_file_mut().sync_all()?;
     persist_temp_file(temp_output, output_path, allow_overwrite)

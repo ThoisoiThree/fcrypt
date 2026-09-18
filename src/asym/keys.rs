@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 use std::fmt;
 use std::fs;
-use std::io::{BufWriter, Read, Write};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tempfile::NamedTempFile;
@@ -24,6 +24,16 @@ pub const MAX_ASYMMETRIC_KEY_FILE_BYTES: u64 = 64 * 1024;
 pub struct RecipientSecretKeyLoad {
     pub identities: Vec<RecipientSecretKeyBundle>,
     pub skipped_paths: Vec<PathBuf>,
+}
+
+#[derive(Deserialize)]
+pub struct KeyMetadata {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub label8: Option<String>,
+    pub key_id: Option<String>,
+    pub created_at_unix: Option<u64>,
+    pub expires_at_unix: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -183,6 +193,13 @@ pub struct GeneratedKeyPair {
     pub signing_secret_path: PathBuf,
 }
 
+pub(crate) struct PreparedKeyPair {
+    pub paths: GeneratedKeyPair,
+    pub recipient: RecipientPublicKeyBundle,
+    pub signer: SigningSecretKeyBundle,
+    pub staged_files: Vec<envelope::StagedFile>,
+}
+
 #[derive(Clone, Copy)]
 struct KeyLifetime {
     created_at_unix: Option<u64>,
@@ -263,6 +280,14 @@ pub fn generate_recipient_key_files(
     keys_dir: &Path,
     force: bool,
 ) -> Result<GeneratedRecipientKeys> {
+    let (generated, staged_files) = prepare_recipient_key_files(keys_dir)?;
+    envelope::persist_staged_files(staged_files, force)?;
+    Ok(generated)
+}
+
+pub(crate) fn prepare_recipient_key_files(
+    keys_dir: &Path,
+) -> Result<(GeneratedRecipientKeys, Vec<envelope::StagedFile>)> {
     pqc::ensure_enabled()?;
     prepare_keys_dir(keys_dir)?;
     let keypair = pqc::generate_recipient_keypair()?;
@@ -303,17 +328,26 @@ pub fn generate_recipient_key_files(
         stage_json_file(&public_path, &public, false)?,
         stage_json_file(&secret_path, &secret, true)?,
     ];
-    envelope::persist_staged_files(staged_files, force)?;
-
-    Ok(GeneratedRecipientKeys {
-        public,
-        secret,
-        public_path,
-        secret_path,
-    })
+    Ok((
+        GeneratedRecipientKeys {
+            public,
+            secret,
+            public_path,
+            secret_path,
+        },
+        staged_files,
+    ))
 }
 
 pub fn generate_signing_key_files(keys_dir: &Path, force: bool) -> Result<GeneratedSigningKeys> {
+    let (generated, staged_files) = prepare_signing_key_files(keys_dir)?;
+    envelope::persist_staged_files(staged_files, force)?;
+    Ok(generated)
+}
+
+pub(crate) fn prepare_signing_key_files(
+    keys_dir: &Path,
+) -> Result<(GeneratedSigningKeys, Vec<envelope::StagedFile>)> {
     pqc::ensure_enabled()?;
     prepare_keys_dir(keys_dir)?;
     let keypair = pqc::generate_signing_keypair()?;
@@ -350,14 +384,15 @@ pub fn generate_signing_key_files(keys_dir: &Path, force: bool) -> Result<Genera
         stage_json_file(&public_path, &public, false)?,
         stage_json_file(&secret_path, &secret, true)?,
     ];
-    envelope::persist_staged_files(staged_files, force)?;
-
-    Ok(GeneratedSigningKeys {
-        public,
-        secret,
-        public_path,
-        secret_path,
-    })
+    Ok((
+        GeneratedSigningKeys {
+            public,
+            secret,
+            public_path,
+            secret_path,
+        },
+        staged_files,
+    ))
 }
 
 pub fn generate_named_key_pair_files(
@@ -366,6 +401,17 @@ pub fn generate_named_key_pair_files(
     lifetime_days: Option<u64>,
     force: bool,
 ) -> Result<GeneratedKeyPair> {
+    let prepared = prepare_named_key_pair_files(keys_dir, name, lifetime_days, force)?;
+    envelope::persist_staged_files(prepared.staged_files, force)?;
+    Ok(prepared.paths)
+}
+
+pub(crate) fn prepare_named_key_pair_files(
+    keys_dir: &Path,
+    name: &str,
+    lifetime_days: Option<u64>,
+    force: bool,
+) -> Result<PreparedKeyPair> {
     pqc::ensure_enabled()?;
     validate_key_file_name(name)?;
     prepare_keys_dir(keys_dir)?;
@@ -450,13 +496,21 @@ pub fn generate_named_key_pair_files(
         stage_json_file(&signing_public_path, &signing_public, false)?,
         stage_json_file(&signing_secret_path, &signing_secret, true)?,
     ];
-    envelope::persist_staged_files(staged_files, force)?;
+    let staged_files = staged_files
+        .into_iter()
+        .map(|file| file.with_overwrite(force))
+        .collect();
 
-    Ok(GeneratedKeyPair {
-        recipient_public_path,
-        recipient_secret_path,
-        signing_public_path,
-        signing_secret_path,
+    Ok(PreparedKeyPair {
+        paths: GeneratedKeyPair {
+            recipient_public_path,
+            recipient_secret_path,
+            signing_public_path,
+            signing_secret_path,
+        },
+        recipient: recipient_public,
+        signer: signing_secret,
+        staged_files,
     })
 }
 
@@ -482,6 +536,12 @@ pub fn read_signing_secret_key(path: &Path) -> Result<SigningSecretKeyBundle> {
     let bundle: SigningSecretKeyBundle = read_json(path)?;
     validate_signing_secret_key(&bundle)?;
     Ok(bundle)
+}
+
+/// Read only non-secret identity metadata. Unknown fields, including private
+/// key material, are skipped by the deserializer rather than allocated.
+pub fn read_key_metadata(path: &Path) -> Result<KeyMetadata> {
+    read_json(path)
 }
 
 pub fn find_recipient_secret_key(
@@ -596,13 +656,9 @@ pub(crate) fn stage_json_file<T: Serialize>(
         .unwrap_or_else(|| PathBuf::from("."));
     fs::create_dir_all(&dir)?;
     let mut temp = NamedTempFile::new_in(&dir)?;
-    {
-        let mut writer = BufWriter::new(temp.as_file_mut());
-        serde_json::to_writer_pretty(&mut writer, value)
-            .map_err(|e| AppError::Serialization(e.to_string()))?;
-        writer.write_all(b"\n")?;
-        writer.flush()?;
-    }
+    serde_json::to_writer_pretty(temp.as_file_mut(), value)
+        .map_err(|e| AppError::Serialization(e.to_string()))?;
+    temp.as_file_mut().write_all(b"\n")?;
 
     #[cfg(unix)]
     {

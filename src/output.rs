@@ -114,6 +114,7 @@ fn error_kind(error: &AppError) -> &'static str {
         AppError::OutputExists(_) | AppError::OutputExistsNonInteractive(_) => "output_exists",
         AppError::PasswordMismatch | AppError::EmptyPassword => "password",
         AppError::DecryptionFailed | AppError::AsymmetricAuthenticationFailed => "authentication",
+        AppError::DecryptionMemoryLimitExceeded { .. } => "resource_limit",
         AppError::SignatureRequired
         | AppError::SignatureVerificationKeyRequired
         | AppError::SignatureVerificationFailed => "signature",

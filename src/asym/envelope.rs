@@ -33,6 +33,7 @@ pub struct DetachedSignature {
 pub(crate) struct StagedFile {
     output_path: PathBuf,
     temp_file: NamedTempFile,
+    allow_overwrite: Option<bool>,
 }
 
 impl StagedFile {
@@ -40,7 +41,13 @@ impl StagedFile {
         Self {
             output_path: output_path.to_path_buf(),
             temp_file,
+            allow_overwrite: None,
         }
+    }
+
+    pub(crate) fn with_overwrite(mut self, allow_overwrite: bool) -> Self {
+        self.allow_overwrite = Some(allow_overwrite);
+        self
     }
 }
 
@@ -142,7 +149,7 @@ pub(crate) fn persist_staged_files(
         }
         match fs::symlink_metadata(&staged.output_path) {
             Ok(metadata) => {
-                if !allow_overwrite {
+                if !staged.allow_overwrite.unwrap_or(allow_overwrite) {
                     return Err(AppError::OutputExists(staged.output_path.clone()));
                 }
                 if !metadata.file_type().is_file() {
@@ -212,18 +219,43 @@ fn stage_backup(path: &Path) -> Result<NamedTempFile> {
 fn rollback_committed_files(
     mut committed: Vec<(PathBuf, Option<NamedTempFile>)>,
 ) -> io::Result<()> {
-    let mut first_error = None;
+    let mut first_error_kind = None;
+    let mut errors = Vec::new();
     while let Some((path, backup)) = committed.pop() {
         let result = match backup {
-            Some(backup) => backup.persist(&path).map(|_| ()).map_err(|e| e.error),
+            Some(backup) => backup.persist(&path).map(|_| ()).map_err(|error| {
+                let kind = error.error.kind();
+                let reason = error.error;
+                let backup_path = error.file.path().to_path_buf();
+                // PersistError owns the only remaining copy of the old file.
+                // Preserve it even if making the temporary file permanent fails.
+                let keep_error = match error.file.keep() {
+                    Ok(_) => String::new(),
+                    Err(mut error) => {
+                        error.file.disable_cleanup(true);
+                        format!("; could not finalize recovery file: {}", error.error)
+                    }
+                };
+                io::Error::new(
+                    kind,
+                    format!(
+                        "failed to restore {}: {}; recovery backup retained at {}{}",
+                        path.display(),
+                        reason,
+                        backup_path.display(),
+                        keep_error
+                    ),
+                )
+            }),
             None => fs::remove_file(&path),
         };
         if let Err(error) = result {
-            first_error.get_or_insert(error);
+            first_error_kind.get_or_insert(error.kind());
+            errors.push(error.to_string());
         }
     }
-    match first_error {
-        Some(error) => Err(error),
+    match first_error_kind {
+        Some(kind) => Err(io::Error::new(kind, errors.join("; "))),
         None => Ok(()),
     }
 }
@@ -233,5 +265,80 @@ fn map_persist_error(error: io::Error, output_path: PathBuf) -> AppError {
         AppError::OutputExists(output_path)
     } else {
         AppError::Io(error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn failed_rollback_retains_all_backups_and_restores_other_files() {
+        let dir = tempdir().expect("temporary directory must be created");
+        let restored = dir.path().join("restored.sec");
+        fs::write(&restored, b"old key").expect("old key must be written");
+        let restored_backup = stage_backup(&restored).expect("backup must be staged");
+        let restored_backup_path = restored_backup.path().to_path_buf();
+        fs::write(&restored, b"new key").expect("key must be replaced");
+        let new_file = dir.path().join("new.pub");
+        fs::write(&new_file, b"new public key").expect("new file must be written");
+        let mut committed = vec![
+            (restored.clone(), Some(restored_backup)),
+            (new_file.clone(), None),
+        ];
+        let mut recovery_paths = Vec::new();
+        for name in ["first.sec", "second.sec"] {
+            let path = dir.path().join(name);
+            fs::write(&path, b"original secret").expect("original must be written");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+                    .expect("secret permissions must be set");
+            }
+            let backup = stage_backup(&path).expect("backup must be staged");
+            recovery_paths.push(backup.path().to_path_buf());
+            fs::remove_file(&path).expect("original must be removed");
+            fs::create_dir(&path).expect("directory must block restoration");
+            committed.push((path, Some(backup)));
+        }
+
+        let error = rollback_committed_files(committed).expect_err("restoration must fail");
+        for path in recovery_paths {
+            assert_eq!(
+                fs::read(&path).expect("backup must survive"),
+                b"original secret"
+            );
+            assert!(error.to_string().contains(&path.display().to_string()));
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(
+                    fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                    0o600
+                );
+            }
+        }
+        assert_eq!(
+            fs::read(restored).expect("old key must be restored"),
+            b"old key"
+        );
+        assert!(!restored_backup_path.exists());
+        assert!(!new_file.exists());
+    }
+
+    #[test]
+    fn per_file_overwrite_denial_survives_transaction_force() {
+        let dir = tempdir().expect("temporary directory must be created");
+        let key_path = dir.path().join("identity.sec");
+        fs::write(&key_path, b"existing key").expect("key must be written");
+        let staged = StagedFile::new(NamedTempFile::new_in(dir.path()).unwrap(), &key_path)
+            .with_overwrite(false);
+        assert!(matches!(
+            persist_staged_files(vec![staged], true),
+            Err(AppError::OutputExists(_))
+        ));
+        assert_eq!(fs::read(key_path).unwrap(), b"existing key");
     }
 }

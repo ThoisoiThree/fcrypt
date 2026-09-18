@@ -712,6 +712,205 @@ fn identity_list_and_inspect_json_never_expose_secret_material() {
 
 #[cfg(feature = "pqc")]
 #[test]
+fn new_identity_encryption_failure_preserves_existing_keys_and_ciphertext() {
+    let dir = tempdir().expect("tempdir must be created");
+    let keys_dir = dir.path().join("keys");
+    let generated = keys::generate_named_key_pair_files(&keys_dir, "alice", None, false)
+        .expect("original identity must be generated");
+    let paths = [
+        generated.recipient_public_path,
+        generated.recipient_secret_path,
+        generated.signing_public_path,
+        generated.signing_secret_path,
+    ];
+    let originals = paths
+        .iter()
+        .map(|path| fs::read(path).unwrap())
+        .collect::<Vec<_>>();
+    let input = dir.path().join("input.txt");
+    let output = dir.path().join("output.bin");
+    let signature = dir.path().join("output.bin.sig");
+    fs::write(&output, b"previous ciphertext").unwrap();
+
+    let refused = AssertCommand::cargo_bin("fcrypt")
+        .unwrap()
+        .arg("encrypt")
+        .arg(&input)
+        .arg("--output")
+        .arg(dir.path().join("unpublished.bin"))
+        .args(["--new-identity", "alice", "--keys-dir"])
+        .arg(&keys_dir)
+        .arg("--json")
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let report: serde_json::Value = serde_json::from_slice(&refused).unwrap();
+    assert_eq!(report["error"]["kind"], "output_exists");
+    assert!(!dir.path().join("unpublished.bin").exists());
+
+    for missing_input in [true, false] {
+        if !missing_input {
+            fs::write(&input, b"new plaintext").unwrap();
+            fs::create_dir(&signature).unwrap();
+        }
+        let result = AssertCommand::cargo_bin("fcrypt")
+            .unwrap()
+            .arg("encrypt")
+            .arg(&input)
+            .arg("--output")
+            .arg(&output)
+            .args(["--new-identity", "alice", "--keys-dir"])
+            .arg(&keys_dir)
+            .args(["--sign", "--force", "--json"])
+            .assert()
+            .failure()
+            .get_output()
+            .stdout
+            .clone();
+        let report: serde_json::Value = serde_json::from_slice(&result).unwrap();
+        assert_eq!(report["status"], "error");
+        for (path, original) in paths.iter().zip(&originals) {
+            assert_eq!(&fs::read(path).unwrap(), original);
+        }
+        assert_eq!(fs::read(&output).unwrap(), b"previous ciphertext");
+        assert_eq!(fs::read_dir(&keys_dir).unwrap().count(), 4);
+    }
+}
+
+#[cfg(feature = "pqc")]
+#[test]
+fn new_identity_encryption_publishes_usable_keys_and_signature() {
+    let dir = tempdir().expect("tempdir must be created");
+    for mode in ["--json", "--quiet", "--no-progress"] {
+        let work = dir.path().join(mode.trim_start_matches('-'));
+        fs::create_dir(&work).unwrap();
+        fs::write(work.join("input.txt"), b"transactional encryption").unwrap();
+        let result = AssertCommand::cargo_bin("fcrypt")
+            .unwrap()
+            .current_dir(&work)
+            .args([
+                "encrypt",
+                "input.txt",
+                "--new-identity",
+                "alice",
+                "--keys-dir",
+                "keys",
+                "--sign",
+                mode,
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        match mode {
+            "--json" => {
+                let report: serde_json::Value = serde_json::from_slice(&result).unwrap();
+                assert_eq!(report["status"], "ok");
+                assert_eq!(report["generated_keys"].as_array().unwrap().len(), 4);
+                assert!(report["signature"].is_string());
+            }
+            "--quiet" => assert!(result.is_empty()),
+            _ => assert!(String::from_utf8(result)
+                .unwrap()
+                .contains("Encryption complete")),
+        }
+        asym::decrypt::decrypt_file(
+            &AssymDecryptArgs {
+                input: work.join("input.txt.bin"),
+                output: Some(work.join("recovered.txt")),
+                identity: Some(work.join("keys/alice_recipient_default.sec")),
+                keys_dir: None,
+                verify: Some(work.join("keys/alice_signer_mldsa87.pub")),
+                require_signature: true,
+                force: false,
+            },
+            |_| {},
+        )
+        .expect("published keys and signature must decrypt the ciphertext");
+        assert_eq!(
+            fs::read(work.join("recovered.txt")).unwrap(),
+            b"transactional encryption"
+        );
+        assert_eq!(fs::read_dir(work.join("keys")).unwrap().count(), 4);
+    }
+}
+
+#[cfg(feature = "pqc")]
+#[test]
+fn late_key_collision_is_not_overwritten_by_ciphertext_force() {
+    let dir = tempdir().expect("tempdir must be created");
+    let input = dir.path().join("input.txt");
+    let output = dir.path().join("output.bin");
+    let keys_dir = dir.path().join("keys");
+    let collision = keys_dir.join("alice_recipient_default.sec");
+    fs::write(&input, b"new plaintext").unwrap();
+    fs::write(&output, b"old ciphertext").unwrap();
+    let result = asym::encrypt::encrypt_file_with_new_identity(
+        &AssymEncryptArgs {
+            input,
+            output: Some(output.clone()),
+            recipient_public: None,
+            keys_dir: Some(keys_dir.clone()),
+            sign: true,
+            sign_key: None,
+            force: true,
+        },
+        "alice",
+        false,
+        &test_config(64),
+        |_| fs::write(&collision, b"concurrent key").unwrap(),
+    );
+    assert!(matches!(result, Err(AppError::OutputExists(_))));
+    assert_eq!(fs::read(&collision).unwrap(), b"concurrent key");
+    assert_eq!(fs::read(&output).unwrap(), b"old ciphertext");
+    assert_eq!(fs::read_dir(keys_dir).unwrap().count(), 1);
+    assert!(!dir.path().join("output.bin.sig").exists());
+}
+
+#[cfg(feature = "pqc")]
+#[test]
+fn failed_automatic_encryption_and_signing_leave_no_generated_keys() {
+    let dir = tempdir().expect("tempdir must be created");
+    let input = dir.path().join("input.txt");
+    let output = dir.path().join("output.bin");
+    let signature = dir.path().join("output.bin.sig");
+    let keys_dir = dir.path().join("keys");
+    fs::write(&input, b"plaintext").unwrap();
+    fs::create_dir(&signature).unwrap();
+    let result = asym::encrypt::encrypt_file(
+        &AssymEncryptArgs {
+            input: input.clone(),
+            output: Some(output.clone()),
+            recipient_public: None,
+            keys_dir: Some(keys_dir.clone()),
+            sign: true,
+            sign_key: None,
+            force: true,
+        },
+        &test_config(64),
+        |_| {},
+    );
+    assert!(result.is_err());
+    assert!(!output.exists());
+    assert_eq!(fs::read_dir(&keys_dir).unwrap().count(), 0);
+
+    let result = asym::sign::sign_file(&AssymSignArgs {
+        input,
+        output: Some(signature),
+        sign_key: None,
+        keys_dir: Some(keys_dir.clone()),
+        embed: false,
+        force: true,
+    });
+    assert!(result.is_err());
+    assert_eq!(fs::read_dir(keys_dir).unwrap().count(), 0);
+}
+
+#[cfg(feature = "pqc")]
+#[test]
 fn forced_keyset_failure_restores_previously_published_files() {
     let dir = tempdir().expect("tempdir must be created");
     let generated = keys::generate_named_key_pair_files(dir.path(), "alice", None, false)

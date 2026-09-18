@@ -56,4 +56,10 @@ Payload chunks use AES-256-GCM. Chunk nonces are:
 Chunk AAD binds each chunk to the encrypted manifest hash, chunk index, total
 plaintext length, total chunk count, chunk plaintext length, and final flag.
 
+Readers allocate payload buffers from the authenticated length of the current
+chunk rather than the manifest's declared maximum chunk size. The current
+reader limits a ciphertext chunk to 64 MiB and returns a resource-limit error
+before allocation when a file requires more memory. This reader policy does not
+change the opaque v1 layout or authentication rules.
+
 Mimicry/steganographic wrappers are intentionally not part of this format.

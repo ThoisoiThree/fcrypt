@@ -45,6 +45,11 @@ pub enum AppError {
     #[error("File is too large for this format.")]
     InputTooLarge,
 
+    #[error(
+        "Encrypted chunk requires a {required}-byte buffer; the decryption limit is {limit} bytes."
+    )]
+    DecryptionMemoryLimitExceeded { required: usize, limit: usize },
+
     #[error("Input file changed while being processed. Please retry.")]
     InputChangedDuringProcessing,
 

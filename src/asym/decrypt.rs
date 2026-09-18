@@ -1,5 +1,5 @@
 use std::fs::{self, File};
-use std::io::{self, BufReader, BufWriter, Seek, SeekFrom, Write};
+use std::io::{self, BufReader, Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use tempfile::NamedTempFile;
 
@@ -96,16 +96,13 @@ where
     let metadata;
     {
         let mut reader = BufReader::with_capacity(DEFAULT_CHUNK_SIZE.max(64 * 1024), input_file);
-        let mut writer =
-            BufWriter::with_capacity(DEFAULT_CHUNK_SIZE.max(64 * 1024), temp_output.as_file_mut());
         metadata = opaque::decrypt_pqc_stream(
             &mut reader,
-            &mut writer,
+            temp_output.as_file_mut(),
             encrypted_len,
             identities,
             on_progress,
         )?;
-        writer.flush()?;
     }
 
     enforce_signature_requirement(&metadata, verification_key)?;
@@ -150,12 +147,26 @@ fn verify_signature_policy(
     encrypted_len: u64,
 ) -> Result<()> {
     if let Some(verification_key) = verification_key {
-        return sign::verify_detached_signature(
+        // An open handle prevents path replacement, but not in-place writes.
+        // Verify and decrypt a private snapshot so both operations see exactly
+        // the same bytes. Only ciphertext is copied to this temporary file.
+        let mut snapshot = tempfile::tempfile()?;
+        input_file.seek(SeekFrom::Start(0))?;
+        let copied = io::copy(
+            &mut (&mut *input_file).take(encrypted_len.saturating_add(1)),
+            &mut snapshot,
+        )?;
+        if copied != encrypted_len {
+            return Err(AppError::InputChangedDuringProcessing);
+        }
+        snapshot.seek(SeekFrom::Start(0))?;
+        sign::verify_detached_signature(
             &args.input,
             verification_key,
-            input_file,
+            &mut snapshot,
             encrypted_len,
-        );
+        )?;
+        *input_file = snapshot;
     }
     Ok(())
 }
@@ -189,6 +200,15 @@ mod tests {
 
     #[test]
     fn verified_file_handle_is_decrypted_after_path_replacement() {
+        assert_verified_snapshot_survives_input_change(false);
+    }
+
+    #[test]
+    fn verified_snapshot_is_decrypted_after_in_place_overwrite() {
+        assert_verified_snapshot_survives_input_change(true);
+    }
+
+    fn assert_verified_snapshot_survives_input_change(overwrite_in_place: bool) {
         let dir = tempdir().expect("tempdir must be created");
         let recipient_public = dir.path().join("recipient.pub");
         let recipient_secret = dir.path().join("recipient.sec");
@@ -212,7 +232,7 @@ mod tests {
         let replacement = dir.path().join("replacement.bin");
         let output = dir.path().join("output.txt");
         fs::write(&signed_plaintext, b"signed plaintext").expect("plaintext must be written");
-        fs::write(&replacement_plaintext, b"replacement plaintext")
+        fs::write(&replacement_plaintext, b"forged plaintext")
             .expect("replacement must be written");
 
         let config = CryptoConfig { chunk_size: 64 };
@@ -273,7 +293,14 @@ mod tests {
         )
         .expect("original open file must verify");
 
-        fs::rename(&replacement, &encrypted).expect("path must be replaced after verification");
+        if overwrite_in_place {
+            let replacement_bytes = fs::read(&replacement).expect("replacement must read");
+            assert_eq!(replacement_bytes.len() as u64, encrypted_len);
+            fs::write(&encrypted, replacement_bytes)
+                .expect("original inode must be overwritten after verification");
+        } else {
+            fs::rename(&replacement, &encrypted).expect("path must be replaced after verification");
+        }
         let identities = vec![keys::read_recipient_secret_key(&recipient_secret)
             .expect("recipient secret key must be readable")];
         decrypt_open_file(

@@ -14,14 +14,16 @@
 //! the encrypted manifest. The fixed prelude size is the price paid for hiding
 //! the normal "this is an encrypted fcrypt file" metadata surface.
 
-use aes_gcm::aead::{Aead, Payload};
+use aes_gcm::aead::{Aead, AeadInPlace, Payload};
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use argon2::{Algorithm, Argon2, Params, Version};
 use hkdf::Hkdf;
 use rand::rngs::OsRng;
 use rand::RngCore;
+use serde::de::{Error as DeError, Visitor};
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_512};
+use std::fmt;
 use std::io::{Read, Write};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -39,6 +41,11 @@ pub const SLOT_CIPHERTEXT_LEN: usize = SLOT_BODY_LEN + TAG_LEN;
 pub const MANIFEST_PLAINTEXT_LEN: usize = 4096;
 pub const MANIFEST_CIPHERTEXT_LEN: usize = MANIFEST_PLAINTEXT_LEN + TAG_LEN;
 pub const PRELUDE_LEN: usize = FILE_NONCE_LEN + SLOT_AREA_LEN + MANIFEST_CIPHERTEXT_LEN;
+/// Maximum ciphertext chunk held in memory while decrypting opaque v1 files.
+/// AES-GCM authentication requires one complete chunk, so larger chunks are
+/// rejected before allocation. This is a reader resource policy, not a format
+/// change: the opaque v1 manifest still accepts chunk sizes up to 1 GiB.
+pub const MAX_DECRYPT_CHUNK_BUFFER_LEN: usize = 64 * 1024 * 1024;
 pub const OPAQUE_V1_ARGON_MEMORY_KIB: u32 = 131_072;
 pub const OPAQUE_V1_ARGON_TIME_COST: u32 = 3;
 pub const OPAQUE_V1_ARGON_PARALLELISM: u32 = 1;
@@ -64,7 +71,7 @@ const SIGNER_KEY_ID_OFFSET: usize =
 
 type HkdfSha3_512 = Hkdf<Sha3_512>;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 struct ManifestV1 {
     version: u16,
     #[serde(with = "serde_bytes")]
@@ -73,14 +80,87 @@ struct ManifestV1 {
     chunk_size: u64,
     chunk_count: u64,
     tag_len: u16,
-    #[serde(with = "serde_bytes")]
-    file_secret: Vec<u8>,
+    file_secret: SecretKey,
+}
+
+struct SecretKey([u8; KEY_LEN]);
+
+impl AsRef<[u8]> for SecretKey {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl Drop for SecretKey {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
+
+impl Serialize for SecretKey {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_bytes(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for SecretKey {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct SecretKeyVisitor;
+
+        impl<'de> Visitor<'de> for SecretKeyVisitor {
+            type Value = SecretKey;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(formatter, "exactly {KEY_LEN} secret-key bytes")
+            }
+
+            fn visit_bytes<E>(self, value: &[u8]) -> std::result::Result<Self::Value, E>
+            where
+                E: DeError,
+            {
+                let bytes: [u8; KEY_LEN] = value
+                    .try_into()
+                    .map_err(|_| E::invalid_length(value.len(), &self))?;
+                Ok(SecretKey(bytes))
+            }
+
+            fn visit_byte_buf<E>(self, value: Vec<u8>) -> std::result::Result<Self::Value, E>
+            where
+                E: DeError,
+            {
+                let value = Zeroizing::new(value);
+                self.visit_bytes(value.as_ref())
+            }
+        }
+
+        deserializer.deserialize_bytes(SecretKeyVisitor)
+    }
+}
+
+impl fmt::Debug for ManifestV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ManifestV1")
+            .field("version", &self.version)
+            .field("magic", &self.magic)
+            .field("plaintext_len", &self.plaintext_len)
+            .field("chunk_size", &self.chunk_size)
+            .field("chunk_count", &self.chunk_count)
+            .field("tag_len", &self.tag_len)
+            .field("file_secret", &"<redacted>")
+            .finish()
+    }
 }
 
 impl Drop for ManifestV1 {
     fn drop(&mut self) {
         self.magic.zeroize();
-        self.file_secret.zeroize();
     }
 }
 
@@ -160,7 +240,7 @@ where
         chunk_size,
         chunk_count,
         tag_len: TAG_LEN as u16,
-        file_secret: file_secret.as_ref().to_vec(),
+        file_secret: SecretKey(*file_secret),
     };
     let manifest_ciphertext = seal_manifest(&file_nonce, &manifest_key, &manifest)?;
 
@@ -285,7 +365,7 @@ where
         chunk_size,
         chunk_count,
         tag_len: TAG_LEN as u16,
-        file_secret: file_secret.as_ref().to_vec(),
+        file_secret: SecretKey(*file_secret),
     };
     let manifest_ciphertext = seal_manifest(&file_nonce, &manifest_key, &manifest)?;
 
@@ -413,20 +493,19 @@ fn seal_password_slot(
         b"password slot nonce",
     )?;
     let aad = slot_aad(b"password", file_nonce, slot_index, &[]);
-    let mut body = build_slot_body(ROLE_PASSWORD, manifest_key);
+    let body = Zeroizing::new(build_slot_body(ROLE_PASSWORD, manifest_key));
     let cipher =
         Aes256Gcm::new_from_slice(slot_key.as_ref()).map_err(|_| AppError::EncryptionFailed)?;
     let ciphertext = cipher
         .encrypt(
             Nonce::from_slice(&nonce),
             Payload {
-                msg: &body,
+                msg: body.as_ref(),
                 aad: &aad,
             },
         )
         .map_err(|_| AppError::EncryptionFailed)?;
     slot[..ciphertext.len()].copy_from_slice(&ciphertext);
-    body.zeroize();
     Ok(())
 }
 
@@ -448,7 +527,7 @@ fn open_password_slots(
         let aad = slot_aad(b"password", file_nonce, slot_index, &[]);
         let cipher =
             Aes256Gcm::new_from_slice(slot_key.as_ref()).map_err(|_| AppError::DecryptionFailed)?;
-        let Ok(mut body) = cipher.decrypt(
+        let Ok(body) = cipher.decrypt(
             Nonce::from_slice(&nonce),
             Payload {
                 msg: &slot[..SLOT_CIPHERTEXT_LEN],
@@ -457,8 +536,8 @@ fn open_password_slots(
         ) else {
             continue;
         };
-        let parsed = parse_slot_body(&body, ROLE_PASSWORD);
-        body.zeroize();
+        let body = Zeroizing::new(body);
+        let parsed = parse_slot_body(body.as_ref(), ROLE_PASSWORD);
         if let Some(key) = parsed {
             return Ok(key);
         }
@@ -509,7 +588,7 @@ fn seal_pqc_slot(
         b"pqc slot nonce",
     )?;
     let aad = slot_aad(b"pqc", file_nonce, slot_index, &slot[..PQC_WRAP_OFFSET]);
-    let mut body = build_slot_body(ROLE_PQC, manifest_key);
+    let mut body = Zeroizing::new(build_slot_body(ROLE_PQC, manifest_key));
     if let Some(signer_key_id) = required_signer_key_id {
         body[SIGNATURE_REQUIREMENT_OFFSET..SIGNER_KEY_ID_OFFSET]
             .copy_from_slice(SIGNATURE_REQUIREMENT_MARKER);
@@ -522,14 +601,13 @@ fn seal_pqc_slot(
         .encrypt(
             Nonce::from_slice(&nonce),
             Payload {
-                msg: &body,
+                msg: body.as_ref(),
                 aad: &aad,
             },
         )
         .map_err(|_| AppError::EncryptionFailed)?;
     slot[PQC_WRAP_OFFSET..PQC_WRAP_OFFSET + ciphertext.len()].copy_from_slice(&ciphertext);
 
-    body.zeroize();
     encapsulated.mlkem1024_shared_secret.zeroize();
     encapsulated.hqc256_shared_secret.zeroize();
     Ok(())
@@ -600,7 +678,7 @@ fn open_pqc_slot_body(
     let wrap = &slot[PQC_WRAP_OFFSET..PQC_WRAP_OFFSET + SLOT_CIPHERTEXT_LEN];
     let cipher = Aes256Gcm::new_from_slice(slot_key.as_ref())
         .map_err(|_| AppError::AsymmetricAuthenticationFailed)?;
-    let Ok(mut body) = cipher.decrypt(
+    let Ok(body) = cipher.decrypt(
         Nonce::from_slice(&nonce),
         Payload {
             msg: wrap,
@@ -609,8 +687,8 @@ fn open_pqc_slot_body(
     ) else {
         return Ok(None);
     };
-    let parsed = parse_pqc_slot_body(&body);
-    body.zeroize();
+    let body = Zeroizing::new(body);
+    let parsed = parse_pqc_slot_body(body.as_ref());
     Ok(parsed)
 }
 
@@ -665,7 +743,7 @@ fn seal_manifest(
     manifest_key: &[u8; KEY_LEN],
     manifest: &ManifestV1,
 ) -> Result<Vec<u8>> {
-    let mut plaintext = encode_manifest_plaintext(manifest)?;
+    let plaintext = encode_manifest_plaintext(manifest)?;
     let nonce = derive_nonce(manifest_key, file_nonce, 0, b"manifest nonce")?;
     let aad = manifest_aad(file_nonce);
     let cipher = Aes256Gcm::new_from_slice(manifest_key).map_err(|_| AppError::EncryptionFailed)?;
@@ -673,12 +751,11 @@ fn seal_manifest(
         .encrypt(
             Nonce::from_slice(&nonce),
             Payload {
-                msg: &plaintext,
+                msg: plaintext.as_ref(),
                 aad: &aad,
             },
         )
         .map_err(|_| AppError::EncryptionFailed)?;
-    plaintext.zeroize();
     if ciphertext.len() != MANIFEST_CIPHERTEXT_LEN {
         return Err(AppError::EncryptionFailed);
     }
@@ -696,27 +773,29 @@ fn open_manifest(
     let nonce = derive_nonce(manifest_key, file_nonce, 0, b"manifest nonce")?;
     let aad = manifest_aad(file_nonce);
     let cipher = Aes256Gcm::new_from_slice(manifest_key).map_err(|_| AppError::DecryptionFailed)?;
-    let mut plaintext = cipher
-        .decrypt(
-            Nonce::from_slice(&nonce),
-            Payload {
-                msg: ciphertext,
-                aad: &aad,
-            },
-        )
-        .map_err(|_| AppError::DecryptionFailed)?;
-    let manifest = decode_manifest_plaintext(&plaintext)?;
-    plaintext.zeroize();
-    Ok(manifest)
+    let plaintext = Zeroizing::new(
+        cipher
+            .decrypt(
+                Nonce::from_slice(&nonce),
+                Payload {
+                    msg: ciphertext,
+                    aad: &aad,
+                },
+            )
+            .map_err(|_| AppError::DecryptionFailed)?,
+    );
+    decode_manifest_plaintext(plaintext.as_ref())
 }
 
-fn encode_manifest_plaintext(manifest: &ManifestV1) -> Result<[u8; MANIFEST_PLAINTEXT_LEN]> {
-    let encoded = encode_cbor(manifest)?;
+fn encode_manifest_plaintext(
+    manifest: &ManifestV1,
+) -> Result<Zeroizing<[u8; MANIFEST_PLAINTEXT_LEN]>> {
+    let encoded = Zeroizing::new(encode_cbor(manifest)?);
     if encoded.len() > u16::MAX as usize || encoded.len() + 2 > MANIFEST_PLAINTEXT_LEN {
         return Err(AppError::InputTooLarge);
     }
-    let mut out = [0u8; MANIFEST_PLAINTEXT_LEN];
-    OsRng.fill_bytes(&mut out);
+    let mut out = Zeroizing::new([0u8; MANIFEST_PLAINTEXT_LEN]);
+    OsRng.fill_bytes(out.as_mut());
     let len = encoded.len() as u16;
     out[..2].copy_from_slice(&len.to_be_bytes());
     out[2..2 + encoded.len()].copy_from_slice(&encoded);
@@ -742,7 +821,6 @@ fn validate_manifest(manifest: &ManifestV1) -> Result<()> {
         || manifest.chunk_size == 0
         || manifest.chunk_size > MAX_CHUNK_SIZE
         || manifest.tag_len != TAG_LEN as u16
-        || manifest.file_secret.len() != KEY_LEN
         || manifest.chunk_count != chunk_count(manifest.plaintext_len, manifest.chunk_size)?
     {
         return Err(AppError::DecryptionFailed);
@@ -775,7 +853,6 @@ where
     let cipher =
         Aes256Gcm::new_from_slice(payload_key.as_ref()).map_err(|_| AppError::EncryptionFailed)?;
     let manifest_hash = Sha3_512::digest(params.manifest_ciphertext);
-    let mut buffer = vec![0u8; params.chunk_size];
     let mut chunk_index = 0u64;
     let mut bytes_read_total = 0u64;
 
@@ -796,6 +873,18 @@ where
         writer.flush()?;
         return Ok(());
     }
+
+    let buffer_len = usize::try_from(
+        params
+            .plaintext_len
+            .min(u64::try_from(params.chunk_size).map_err(|_| AppError::InputTooLarge)?),
+    )
+    .map_err(|_| AppError::InputTooLarge)?;
+    let mut buffer = Zeroizing::new(Vec::new());
+    buffer
+        .try_reserve_exact(buffer_len)
+        .map_err(|_| AppError::InputTooLarge)?;
+    buffer.resize(buffer_len, 0);
 
     loop {
         let read_bytes = read_plaintext_chunk(reader, &mut buffer)?;
@@ -868,7 +957,7 @@ where
     if actual != expected {
         return Err(auth_failure.error());
     }
-    let file_secret = slice_to_key(&opened.manifest.file_secret)?;
+    let file_secret = slice_to_key(opened.manifest.file_secret.as_ref())?;
     stream_decrypt_payload(
         reader,
         writer,
@@ -927,56 +1016,115 @@ where
         Aes256Gcm::new_from_slice(payload_key.as_ref()).map_err(|_| params.auth_failure.error())?;
     let manifest_hash = Sha3_512::digest(params.manifest_ciphertext);
     let chunk_size_u64 = u64::try_from(params.chunk_size).map_err(|_| AppError::InputTooLarge)?;
-    let full_chunks = params.plaintext_len / chunk_size_u64;
-    let last_plain_len = params.plaintext_len % chunk_size_u64;
-    let full_chunk_cipher_len = params
-        .chunk_size
-        .checked_add(TAG_LEN)
-        .ok_or(AppError::InputTooLarge)?;
-    let mut ciphertext_buffer = vec![0u8; full_chunk_cipher_len];
+    let mut ciphertext_buffer = Zeroizing::new(Vec::new());
+
+    if params.plaintext_len == 0 {
+        decrypt_payload_chunk(
+            reader,
+            writer,
+            &cipher,
+            &nonce_base,
+            &manifest_hash,
+            &mut ciphertext_buffer,
+            &params,
+            0,
+            0,
+            true,
+        )?;
+        on_progress(TAG_LEN as u64);
+        writer.flush()?;
+        return Ok(());
+    }
 
     for chunk_index in 0..params.chunk_count {
-        let plain_len = if params.plaintext_len == 0 {
-            0
-        } else if chunk_index < full_chunks {
-            params.chunk_size
-        } else {
-            usize::try_from(last_plain_len).map_err(|_| AppError::InputTooLarge)?
-        };
+        let chunk_offset = chunk_index
+            .checked_mul(chunk_size_u64)
+            .ok_or(AppError::InputTooLarge)?;
+        let remaining = params
+            .plaintext_len
+            .checked_sub(chunk_offset)
+            .ok_or_else(|| params.auth_failure.error())?;
+        let plain_len =
+            usize::try_from(remaining.min(chunk_size_u64)).map_err(|_| AppError::InputTooLarge)?;
         let current_cipher_len = plain_len
             .checked_add(TAG_LEN)
             .ok_or(AppError::InputTooLarge)?;
-        let chunk = &mut ciphertext_buffer[..current_cipher_len];
-        reader
-            .read_exact(chunk)
-            .map_err(|_| params.auth_failure.error())?;
         let is_final = chunk_index + 1 == params.chunk_count;
-        let nonce = build_payload_nonce(&nonce_base, chunk_index);
-        let aad = payload_aad(
+        decrypt_payload_chunk(
+            reader,
+            writer,
+            &cipher,
+            &nonce_base,
             &manifest_hash,
+            &mut ciphertext_buffer,
+            &params,
             chunk_index,
-            params.plaintext_len,
-            params.chunk_count,
-            plain_len as u64,
+            plain_len,
             is_final,
-        );
-        let mut plaintext = cipher
-            .decrypt(
-                Nonce::from_slice(&nonce),
-                Payload {
-                    msg: chunk,
-                    aad: &aad,
-                },
-            )
-            .map_err(|_| params.auth_failure.error())?;
-        writer.write_all(&plaintext)?;
+        )?;
         on_progress(current_cipher_len as u64);
-        plaintext.zeroize();
-        chunk.zeroize();
     }
 
     ciphertext_buffer.zeroize();
     writer.flush()?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn decrypt_payload_chunk<R: Read, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+    cipher: &Aes256Gcm,
+    nonce_base: &[u8; PAYLOAD_NONCE_BASE_LEN],
+    manifest_hash: &[u8],
+    ciphertext_buffer: &mut Vec<u8>,
+    params: &PayloadDecryptParams<'_>,
+    chunk_index: u64,
+    plain_len: usize,
+    is_final: bool,
+) -> Result<()> {
+    let cipher_len = plain_len
+        .checked_add(TAG_LEN)
+        .ok_or(AppError::InputTooLarge)?;
+    resize_decryption_buffer(ciphertext_buffer, cipher_len)?;
+    reader
+        .read_exact(ciphertext_buffer)
+        .map_err(|_| params.auth_failure.error())?;
+    let nonce = build_payload_nonce(nonce_base, chunk_index);
+    let aad = payload_aad(
+        manifest_hash,
+        chunk_index,
+        params.plaintext_len,
+        params.chunk_count,
+        plain_len as u64,
+        is_final,
+    );
+    cipher
+        .decrypt_in_place(Nonce::from_slice(&nonce), &aad, ciphertext_buffer)
+        .map_err(|_| params.auth_failure.error())?;
+    debug_assert_eq!(ciphertext_buffer.len(), plain_len);
+    let write_result = writer.write_all(ciphertext_buffer);
+    ciphertext_buffer.zeroize();
+    write_result?;
+    Ok(())
+}
+
+fn resize_decryption_buffer(buffer: &mut Vec<u8>, required: usize) -> Result<()> {
+    if required > MAX_DECRYPT_CHUNK_BUFFER_LEN {
+        return Err(AppError::DecryptionMemoryLimitExceeded {
+            required,
+            limit: MAX_DECRYPT_CHUNK_BUFFER_LEN,
+        });
+    }
+    if required > buffer.capacity() {
+        buffer
+            .try_reserve_exact(required - buffer.len())
+            .map_err(|_| AppError::DecryptionMemoryLimitExceeded {
+                required,
+                limit: MAX_DECRYPT_CHUNK_BUFFER_LEN,
+            })?;
+    }
+    buffer.resize(required, 0);
     Ok(())
 }
 
@@ -1240,4 +1388,133 @@ fn encode_cbor<T: Serialize>(value: &T) -> Result<Vec<u8>> {
 
 fn decode_cbor<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<T> {
     ciborium::de::from_reader(bytes).map_err(|e| AppError::Serialization(e.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Serialize)]
+    struct LegacyManifestEncoding {
+        version: u16,
+        #[serde(with = "serde_bytes")]
+        magic: Vec<u8>,
+        plaintext_len: u64,
+        chunk_size: u64,
+        chunk_count: u64,
+        tag_len: u16,
+        #[serde(with = "serde_bytes")]
+        file_secret: Vec<u8>,
+    }
+
+    #[test]
+    fn manifest_secret_is_redacted_and_keeps_v1_encoding() {
+        let manifest = ManifestV1 {
+            version: FORMAT_VERSION,
+            magic: INTERNAL_MAGIC.to_vec(),
+            plaintext_len: 1,
+            chunk_size: 4096,
+            chunk_count: 1,
+            tag_len: TAG_LEN as u16,
+            file_secret: SecretKey([0xa5; KEY_LEN]),
+        };
+        let legacy = LegacyManifestEncoding {
+            version: FORMAT_VERSION,
+            magic: INTERNAL_MAGIC.to_vec(),
+            plaintext_len: 1,
+            chunk_size: 4096,
+            chunk_count: 1,
+            tag_len: TAG_LEN as u16,
+            file_secret: vec![0xa5; KEY_LEN],
+        };
+
+        let debug = format!("{manifest:?}");
+        assert!(debug.contains("file_secret: \"<redacted>\""));
+        assert!(!debug.contains("165"));
+
+        let encoded = encode_cbor(&manifest).expect("manifest must encode");
+        let legacy_encoded = encode_cbor(&legacy).expect("legacy manifest must encode");
+        assert_eq!(encoded, legacy_encoded);
+
+        let decoded: ManifestV1 = decode_cbor(&encoded).expect("manifest must decode");
+        assert_eq!(decoded.file_secret.as_ref(), &[0xa5; KEY_LEN]);
+    }
+
+    #[test]
+    fn decryption_buffer_uses_actual_chunk_length() {
+        let mut buffer = Vec::new();
+
+        resize_decryption_buffer(&mut buffer, TAG_LEN).expect("empty payload tag must fit");
+        assert_eq!(buffer.len(), TAG_LEN);
+
+        resize_decryption_buffer(&mut buffer, TAG_LEN + 1)
+            .expect("one-byte payload chunk must fit");
+        assert_eq!(buffer.len(), TAG_LEN + 1);
+    }
+
+    #[test]
+    fn oversized_decryption_buffer_is_rejected_before_allocation() {
+        let mut buffer = Vec::new();
+        let required = MAX_DECRYPT_CHUNK_BUFFER_LEN + 1;
+
+        let error = resize_decryption_buffer(&mut buffer, required)
+            .expect_err("chunk above the memory budget must be rejected");
+
+        assert!(matches!(
+            error,
+            AppError::DecryptionMemoryLimitExceeded {
+                required: actual,
+                limit: MAX_DECRYPT_CHUNK_BUFFER_LEN,
+            } if actual == required
+        ));
+        assert!(buffer.is_empty());
+        assert_eq!(buffer.capacity(), 0);
+    }
+
+    #[test]
+    fn maximum_declared_chunk_roundtrips_tiny_and_empty_payloads() {
+        for plaintext in [b"".as_slice(), b"x".as_slice()] {
+            let file_nonce = [7u8; FILE_NONCE_LEN];
+            let manifest_ciphertext = vec![11u8; MANIFEST_CIPHERTEXT_LEN];
+            let file_secret = [13u8; KEY_LEN];
+            let chunk_size = MAX_CHUNK_SIZE as usize;
+            let mut reader = plaintext;
+            let mut encrypted = Vec::new();
+
+            stream_encrypt_payload(
+                &mut reader,
+                &mut encrypted,
+                PayloadEncryptParams {
+                    file_nonce: &file_nonce,
+                    manifest_ciphertext: &manifest_ciphertext,
+                    plaintext_len: plaintext.len() as u64,
+                    chunk_size,
+                    chunk_count: 1,
+                    file_secret: &file_secret,
+                },
+                |_| {},
+            )
+            .expect("tiny payload must encrypt without a declared-size allocation");
+            assert_eq!(encrypted.len(), plaintext.len() + TAG_LEN);
+
+            let mut encrypted_reader = encrypted.as_slice();
+            let mut decrypted = Vec::new();
+            stream_decrypt_payload(
+                &mut encrypted_reader,
+                &mut decrypted,
+                PayloadDecryptParams {
+                    file_nonce: &file_nonce,
+                    manifest_ciphertext: &manifest_ciphertext,
+                    plaintext_len: plaintext.len() as u64,
+                    chunk_size,
+                    chunk_count: 1,
+                    file_secret: &file_secret,
+                    auth_failure: AuthFailure::Password,
+                },
+                |_| {},
+            )
+            .expect("tiny payload must decrypt using its actual chunk length");
+            assert_eq!(decrypted, plaintext);
+        }
+    }
 }

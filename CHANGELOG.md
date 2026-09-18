@@ -7,6 +7,23 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Security
+
+- Verify and decrypt a private ciphertext snapshot so concurrent in-place
+  changes to the input cannot bypass detached-signature verification.
+- Publish automatically generated identities, ciphertext, and signatures in
+  one transaction. Failed encryption or signing no longer leaves generated
+  keys behind or replaces an existing identity before the operation succeeds.
+- Retain recovery backups when rollback fails and report every backup path
+  instead of deleting the remaining copies of previous files.
+- Bound opaque payload decryption to a 64 MiB ciphertext buffer, allocate only
+  the current chunk's actual length, and decrypt in place. Empty and short
+  payloads no longer allocate the chunk size declared by the manifest.
+- Zeroize manifest, slot, and plaintext chunk buffers through RAII on success
+  and error paths, redact the manifest file secret from debug output, and make
+  identity metadata inspection skip private-key values instead of allocating
+  them.
+
 ## [0.3.3] - 2026-07-23
 
 ### Security
