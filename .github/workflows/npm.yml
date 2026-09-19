@@ -58,6 +58,11 @@ jobs:
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
 
+      - name: Validate tagged release metadata
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: bash packaging/scripts/check-release-version.sh "$GITHUB_REF_NAME"
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:

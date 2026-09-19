@@ -7,6 +7,10 @@ links = "oqs"
 description = "Pinned liboqs bindings for fcrypt"
 readme = "README.md"
 repository = "https://github.com/ThoisoiThree/fcrypt"
+homepage = "https://github.com/ThoisoiThree/fcrypt"
+documentation = "https://docs.rs/fcrypt-oqs-sys"
+keywords = ["cryptography", "post-quantum", "liboqs", "ffi", "pqc"]
+categories = ["cryptography", "external-ffi-bindings"]
 license = "MIT"
 
 # Exclude liboqs; build.rs fetches and verifies the pinned commit below.

@@ -7,14 +7,28 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.3.5] - 2026-09-20
+
+### Added
+
+- Added tag-triggered crates.io publishing in dependency order for
+  `fcrypt-oqs-sys`, `fcrypt-oqs`, and `fcrypt`.
+- Added a step-by-step release tutorial covering GitHub Releases, npm, and
+  crates.io.
+
 ### Security
 
-- Ship dedicated `fcrypt-oqs` bindings that pin the vendored liboqs C
+- Shipped dedicated `fcrypt-oqs` bindings that pin the vendored liboqs C
   implementation to commit
   `282809f06dccf6893980035cb11f319684d10d52` and verify the revision of fresh
   and cached source trees, including worktree cleanliness, before compilation.
   A movable upstream tag or a pre-populated build cache can no longer silently
   select different C code.
+
+## [0.3.4] - 2026-09-19
+
+### Security
+
 - Verify and decrypt a private ciphertext snapshot so concurrent in-place
   changes to the input cannot bypass detached-signature verification.
 - Publish automatically generated identities, ciphertext, and signatures in
@@ -147,7 +161,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Safe temp-file output workflow (finalize only after successful operation).
 - Integration tests for roundtrip, edge cases, corruption/truncation, and naming logic.
 
-[Unreleased]: https://github.com/ThoisoiThree/fcrypt/compare/v0.3.3...HEAD
+[Unreleased]: https://github.com/ThoisoiThree/fcrypt/compare/v0.3.5...HEAD
+[0.3.5]: https://github.com/ThoisoiThree/fcrypt/compare/v0.3.4...v0.3.5
+[0.3.4]: https://github.com/ThoisoiThree/fcrypt/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/ThoisoiThree/fcrypt/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/ThoisoiThree/fcrypt/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/ThoisoiThree/fcrypt/compare/v0.3.0...v0.3.1

@@ -54,6 +54,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      - name: Validate release metadata
+        shell: bash
+        run: bash packaging/scripts/check-release-version.sh "$GITHUB_REF_NAME"
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:

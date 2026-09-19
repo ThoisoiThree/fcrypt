@@ -38,6 +38,10 @@ jobs:
         with:
           ref: ${{ inputs.ref || github.ref }}
 
+      - name: Validate tagged release metadata
+        if: startsWith(github.ref, 'refs/tags/')
+        run: bash packaging/scripts/check-release-version.sh "$GITHUB_REF_NAME"
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 

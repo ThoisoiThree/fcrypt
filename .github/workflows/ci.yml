@@ -18,6 +18,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      - name: Check release metadata consistency
+        run: |
+          VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
+          bash packaging/scripts/check-release-version.sh "$VERSION"
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:

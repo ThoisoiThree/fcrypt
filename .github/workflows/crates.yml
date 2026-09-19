@@ -1,0 +1,100 @@
+name: crates.io
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  publish:
+    name: Publish Rust crates
+    runs-on: ubuntu-latest
+    environment: crates-publish
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Validate release metadata
+        shell: bash
+        run: bash packaging/scripts/check-release-version.sh "$GITHUB_REF_NAME"
+
+      - name: Publish crates in dependency order
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          manifest_version() {
+            sed -n 's/^version = "\([^"]*\)"/\1/p' "$1" | head -n 1
+          }
+
+          crate_exists() {
+            local name="$1"
+            local version="${2//+/%2B}"
+            curl --fail --silent --show-error \
+              "https://crates.io/api/v1/crates/${name}/${version}" >/dev/null 2>&1
+          }
+
+          wait_for_crate() {
+            local name="$1"
+            local version="$2"
+
+            for attempt in {1..30}; do
+              if crate_exists "$name" "$version"; then
+                echo "${name}@${version} is available in the crates.io index"
+                return 0
+              fi
+              echo "Waiting for ${name}@${version} (attempt ${attempt}/30)"
+              sleep 10
+            done
+
+            echo "::error::${name}@${version} did not appear on crates.io in time"
+            return 1
+          }
+
+          publish_crate() {
+            local name="$1"
+            local version="$2"
+            local manifest="$3"
+            shift 3
+
+            if crate_exists "$name" "$version"; then
+              echo "${name}@${version} is already published"
+            else
+              cargo publish --manifest-path "$manifest" "$@"
+            fi
+            wait_for_crate "$name" "$version"
+          }
+
+          SYS_VERSION="$(manifest_version vendor/fcrypt-oqs-sys/Cargo.toml)"
+          OQS_VERSION="$(manifest_version vendor/fcrypt-oqs/Cargo.toml)"
+
+          publish_crate \
+            "fcrypt-oqs-sys" \
+            "$SYS_VERSION" \
+            "vendor/fcrypt-oqs-sys/Cargo.toml"
+
+          publish_crate \
+            "fcrypt-oqs" \
+            "$OQS_VERSION" \
+            "vendor/fcrypt-oqs/Cargo.toml"
+
+          publish_crate \
+            "fcrypt" \
+            "${GITHUB_REF_NAME#v}" \
+            "Cargo.toml" \
+            --locked

@@ -1,5 +1,8 @@
 # Release Process
 
+An expanded step-by-step tutorial is available in
+`docs/RELEASING_TUTORIAL.md`.
+
 ## 1. Prepare release
 
 1. Ensure `CHANGELOG.md` has a section for the new version.
@@ -42,20 +45,18 @@ After pushing a `v*` tag, GitHub Actions `release.yml` will:
 
 ## 4. crates.io
 
-Publishing to crates.io is manual and requires an authenticated Cargo session.
-When the binding packages changed, publish them in dependency order before the
-main package:
+GitHub Actions `crates.yml` publishes `fcrypt-oqs-sys`, `fcrypt-oqs`, and
+`fcrypt` in dependency order. It waits for each dependency to appear in the
+crates.io index and skips an exact version that is already published.
 
-1. Run `cargo login` and paste a crates.io API token when prompted.
-2. Dry-run and publish `fcrypt-oqs-sys` from
-   `vendor/fcrypt-oqs-sys/Cargo.toml`. Wait until it is available in the index.
-3. Dry-run and publish `fcrypt-oqs` from `vendor/fcrypt-oqs/Cargo.toml`, then
-   verify it in the index. Skip either binding package when that exact version
-   is already published and unchanged.
-4. Run `cargo publish -p fcrypt --dry-run --locked`, then publish the prepared
-   main version with `cargo publish -p fcrypt --locked`.
-5. Verify the published package with `cargo info fcrypt` and
-   `cargo install fcrypt --locked`.
+Before the first run:
+
+1. Create the GitHub environment `crates-publish`.
+2. Add a crates.io API token as its `CARGO_REGISTRY_TOKEN` secret.
+3. Require reviewers for that environment when practical.
+
+Pushing a `vX.Y.Z` tag starts the workflow. Manual fallback commands and
+first-publication details are documented in `docs/RELEASING_TUTORIAL.md`.
 
 Published crate versions cannot be overwritten or deleted. A broken version can
 only be yanked, so do not publish until the dry run and release checks pass.
