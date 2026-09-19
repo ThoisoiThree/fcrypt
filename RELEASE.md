@@ -3,16 +3,21 @@
 ## 1. Prepare release
 
 1. Ensure `CHANGELOG.md` has a section for the new version.
-2. Bump `version` in `Cargo.toml`, root `package.json`, and every `npm/packages/*/package.json`.
-3. Run checks:
+2. Record the shipped liboqs commit in `CHANGELOG.md` and confirm it matches
+   `LIBOQS_REVISION` in `vendor/fcrypt-oqs-sys/build.rs` and
+   `package.metadata.liboqs.revision` in that crate's `Cargo.toml`.
+3. Bump `version` in `Cargo.toml`, root `package.json`, and every `npm/packages/*/package.json`.
+4. Run checks:
    - `cargo fmt --all -- --check`
    - `cargo clippy --locked --all-targets --all-features -- -D warnings`
    - `cargo clippy --locked --all-targets --no-default-features -- -D warnings`
    - `cargo test --locked --all-features`
    - `cargo test --locked --no-default-features`
    - `cargo build --release --locked`
-   - `cargo package --list`
-   - `cargo publish --dry-run --locked`
+   - `cargo package --manifest-path vendor/fcrypt-oqs-sys/Cargo.toml --list`
+   - `cargo package --manifest-path vendor/fcrypt-oqs/Cargo.toml --list`
+   - `cargo package -p fcrypt --list`
+   - Run the publish dry-runs in the dependency order described in section 4.
 
 ## 2. Create tag
 
@@ -37,11 +42,19 @@ After pushing a `v*` tag, GitHub Actions `release.yml` will:
 
 ## 4. crates.io
 
-Publishing to crates.io is manual and requires an authenticated Cargo session:
+Publishing to crates.io is manual and requires an authenticated Cargo session.
+When the binding packages changed, publish them in dependency order before the
+main package:
 
 1. Run `cargo login` and paste a crates.io API token when prompted.
-2. Publish the prepared version with `cargo publish --locked`.
-3. Verify the published package with `cargo info fcrypt` and
+2. Dry-run and publish `fcrypt-oqs-sys` from
+   `vendor/fcrypt-oqs-sys/Cargo.toml`. Wait until it is available in the index.
+3. Dry-run and publish `fcrypt-oqs` from `vendor/fcrypt-oqs/Cargo.toml`, then
+   verify it in the index. Skip either binding package when that exact version
+   is already published and unchanged.
+4. Run `cargo publish -p fcrypt --dry-run --locked`, then publish the prepared
+   main version with `cargo publish -p fcrypt --locked`.
+5. Verify the published package with `cargo info fcrypt` and
    `cargo install fcrypt --locked`.
 
 Published crate versions cannot be overwritten or deleted. A broken version can

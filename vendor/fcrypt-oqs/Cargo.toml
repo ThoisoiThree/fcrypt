@@ -1,0 +1,51 @@
+[package]
+name = "fcrypt-oqs"
+version = "0.11.2"
+authors = ["Thom Wiggers <thom@thomwiggers.nl>", "Tectonic Labs Developers"]
+edition = "2021"
+description = "Pinned Rust bindings to Open-Quantum-Safe's liboqs for fcrypt"
+readme = "README.md"
+repository = "https://github.com/ThoisoiThree/fcrypt"
+license = "MIT"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[dependencies]
+libc = "0.2"
+cstr_core = { version = "0.2", default-features = false, features = ["alloc"] }
+serde = { version = "1.0", optional = true, default-features = false, features = ["derive", "alloc"] }
+serdect = { version = "0.4", optional = true}
+zeroize = { version = "1.8", features = ["derive"], optional = true }
+
+[dependencies.oqs-sys]
+package = "fcrypt-oqs-sys"
+path = "../fcrypt-oqs-sys"
+version = "=0.11.2"
+default-features = false
+
+[features]
+default = ["oqs-sys/openssl", "kems", "serde", "sigs", "std", "zeroize"]
+serde = ["dep:serde", "dep:serdect"]
+std = []
+non_portable = ["oqs-sys/non_portable"]
+vendored = ["oqs-sys/vendored"]
+vendored_openssl = ["oqs-sys/vendored_openssl"]
+
+# algorithms: KEMs
+kems = ["oqs-sys/kems", "classic_mceliece", "frodokem", "hqc", "kyber", "ml_kem", "ntruprime"]
+bike = ["oqs-sys/bike"]  # not supported on Windows or 32-bit ARM
+classic_mceliece = ["oqs-sys/classic_mceliece"]
+frodokem = ["oqs-sys/frodokem"]
+hqc = ["oqs-sys/hqc"]
+kyber = ["oqs-sys/kyber"]
+ml_kem = ["oqs-sys/ml_kem"]
+ntruprime = ["oqs-sys/ntruprime"]
+# algorithms: Signature schemes
+sigs = ["oqs-sys/sigs", "cross", "dilithium", "falcon", "mayo", "ml_dsa", "slh_dsa", "sphincs", "uov"]
+cross = ["oqs-sys/cross"]
+dilithium = ["oqs-sys/dilithium"]
+falcon = ["oqs-sys/falcon"]
+mayo = ["oqs-sys/mayo"]
+ml_dsa = ["oqs-sys/ml_dsa"]
+slh_dsa = ["oqs-sys/slh_dsa"]
+sphincs = ["oqs-sys/sphincs"]
+uov = ["oqs-sys/uov"]

@@ -9,6 +9,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Security
 
+- Ship dedicated `fcrypt-oqs` bindings that pin the vendored liboqs C
+  implementation to commit
+  `282809f06dccf6893980035cb11f319684d10d52` and verify the revision of fresh
+  and cached source trees, including worktree cleanliness, before compilation.
+  A movable upstream tag or a pre-populated build cache can no longer silently
+  select different C code.
 - Verify and decrypt a private ciphertext snapshot so concurrent in-place
   changes to the input cannot bypass detached-signature verification.
 - Publish automatically generated identities, ciphertext, and signatures in

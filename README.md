@@ -136,8 +136,12 @@ cargo build --release --locked
 ```
 
 Asymmetric PQC mode is enabled by default through the `pqc` feature and uses a
-patched Open Quantum Safe `liboqs` 0.15.x build through the `tectonic-oqs`
-bindings. Building with PQC support can require:
+patched Open Quantum Safe `liboqs` 0.15.x build through an API-compatible fork
+of `tectonic-oqs`, packaged separately as `fcrypt-oqs` and `fcrypt-oqs-sys`.
+The C sources are pinned to commit
+`282809f06dccf6893980035cb11f319684d10d52`; the build rejects any fresh or
+cached checkout whose `HEAD` differs or whose worktree is not clean. Building
+with PQC support can require:
 
 - Rust stable
 - Git and network access while the versioned liboqs source is fetched

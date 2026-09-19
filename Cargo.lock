@@ -461,7 +461,7 @@ checksum = "37909eebbb50d72f9059c3b6d82c0463f2ff062c9e95845c43a6c9c0355411be"
 
 [[package]]
 name = "fcrypt"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -479,7 +479,7 @@ dependencies = [
  "serde_bytes",
  "serde_json",
  "sha3",
- "tectonic-oqs",
+ "fcrypt-oqs",
  "tempfile",
  "thiserror",
  "zeroize",
@@ -1099,21 +1099,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "tectonic-oqs"
+name = "fcrypt-oqs"
 version = "0.11.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab9b6716e0dc70a790b2afe48fe7fd28ae8cb68befe0105676c458a2fb700d53"
 dependencies = [
  "cstr_core",
  "libc",
- "tectonic-oqs-sys",
+ "fcrypt-oqs-sys",
 ]
 
 [[package]]
-name = "tectonic-oqs-sys"
-version = "0.11.2+liboqs-0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab3fbcf31fdc1978f1b48a4589af24a2125dfec13daf68dc8eacfdc4b75a7ad3"
+name = "fcrypt-oqs-sys"
+version = "0.11.2+liboqs-0.15.1"
 dependencies = [
  "bindgen",
  "build-deps",

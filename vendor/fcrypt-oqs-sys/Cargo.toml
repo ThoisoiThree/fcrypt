@@ -1,0 +1,59 @@
+[package]
+name = "fcrypt-oqs-sys"
+version = "0.11.2+liboqs-0.15.1"
+authors = ["Thom Wiggers <thom@thomwiggers.nl>"]
+edition = "2021"
+links = "oqs"
+description = "Pinned liboqs bindings for fcrypt"
+readme = "README.md"
+repository = "https://github.com/ThoisoiThree/fcrypt"
+license = "MIT"
+
+# Exclude liboqs; build.rs fetches and verifies the pinned commit below.
+include = ["/LICENSE", "/README.md", "/build.rs", "/src/**"]
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+libc = "0.2"
+openssl-sys = { version = "0.9", features = ["vendored"], optional = true }
+
+[build-dependencies]
+pkg-config = "0.3"
+cmake = "0.1"
+bindgen = "0.72"
+build-deps = "0.1"
+
+[features]
+default = ["openssl", "kems", "sigs"]
+openssl = []
+vendored_openssl = ["openssl", "vendored", "dep:openssl-sys"]
+docs = []
+non_portable = []
+vendored = []
+# algorithms: KEMs
+kems = ["classic_mceliece", "frodokem", "hqc", "kyber", "ml_kem", "ntruprime"]
+bike = []  # BIKE is enabled by build.rs on non-windows targets
+classic_mceliece = []
+frodokem = []
+hqc = []
+kyber = []
+ml_kem = []
+ntruprime = []
+# algorithms: Signature schemes
+sigs = ["cross", "dilithium", "falcon", "mayo", "ml_dsa", "slh_dsa", "sphincs", "uov"]
+cross = []
+dilithium = []
+falcon = []
+mayo = []
+ml_dsa = []
+slh_dsa = []
+sphincs = []
+uov = []
+
+[package.metadata.liboqs]
+url = "https://github.com/tectonic-labs/liboqs.git"
+revision = "282809f06dccf6893980035cb11f319684d10d52"
+
+[package.metadata.docs.rs]
+features = ["docs"]
