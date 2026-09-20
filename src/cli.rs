@@ -8,11 +8,21 @@ use crate::error::{AppError, Result};
 #[command(
     name = "fcrypt",
     version,
+    disable_version_flag = true,
+    arg(clap::Arg::new("version")
+        .long("version")
+        .short('V')
+        .visible_short_alias('v')
+        .action(clap::ArgAction::Version)
+        .help("Print version")),
     about = "Encrypt files with passwords or post-quantum recipient keys.",
     long_about = None,
     after_help = "Start here:\n  fcrypt encrypt report.pdf\n  fcrypt identity create alice\n  fcrypt encrypt report.pdf --recipient ./alice_recipient_default.pub\n\nFull reference:\n  fcrypt help-all"
 )]
 pub struct Cli {
+    /// Payload workers: 0 = automatic, 1 = sequential (bounded by memory).
+    #[arg(long, short = 't', global = true, default_value_t = 0, value_parser = clap::value_parser!(u16).range(0..=32))]
+    pub threads: u16,
     /// Suppress success messages and progress output.
     #[arg(long, short = 'q', global = true, conflicts_with = "json")]
     pub quiet: bool,
@@ -29,10 +39,10 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Encrypt a file with a password or a recipient public key.
-    #[command(visible_alias = "encode")]
+    #[command(visible_aliases = ["encode", "enc"])]
     Encrypt(EncryptArgs),
     /// Decrypt a password or recipient-key encrypted file.
-    #[command(visible_alias = "decode")]
+    #[command(visible_aliases = ["decode", "dec"])]
     Decrypt(DecryptArgs),
     /// Create a detached ML-DSA-87 signature.
     Sign(SignArgs),

@@ -7,6 +7,16 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- Added `fcrypt -v` as a version alias and `enc` / `dec` command aliases,
+  including the legacy asymmetric command group.
+
+- Process independent payload chunks on multiple CPU cores with bounded buffers
+  and ordered output. Added global `--threads 0..32` (short form `-t`; 0 = automatic,
+  1 = sequential), for password and PQC encryption/decryption.
+  Opaque v1 files, nonces, authentication data, and Argon2 parameters are unchanged.
+
 ## [0.3.5] - 2026-09-20
 
 ### Added

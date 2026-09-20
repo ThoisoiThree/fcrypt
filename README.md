@@ -5,6 +5,11 @@ key generation, and post-quantum asymmetric encryption.
 
 The Cargo package, Rust crate, and installed binary are all named `fcrypt`.
 
+Use `fcrypt -v`, `fcrypt -V`, or `fcrypt --version` to print the version.
+`enc` and `dec` are short aliases for `encrypt` and `decrypt`, including
+under `asym`. Existing `encode` and `decode` aliases remain available.
+Within decryption commands, `-v FILE` retains its signature-verification meaning.
+
 `fcrypt` is designed for large files. It processes data as authenticated
 chunks, writes outputs through temporary files, and finalizes results only after
 the operation succeeds.
@@ -27,6 +32,7 @@ To read old files created by `fcrypt` `0.2.0` or earlier, use `fcrypt` version
 - Post-quantum asymmetric encryption with ML-KEM-1024 + HQC-256 recipient
   slots.
 - AES-256-GCM streaming payload encryption with `u64` chunk indexes.
+- Parallel payload encryption and decryption with automatic worker selection.
 - Detached ML-DSA-87 signatures for opaque ciphertext files.
 - Explicit identity creation with `identity create <name>` for recipient and
   signing key pairs. The legacy `asym encrypt` workflow retains its historical
@@ -41,6 +47,30 @@ To read old files created by `fcrypt` `0.2.0` or earlier, use `fcrypt` version
   not guarantee recovery after a process crash or power loss.
 - npm packages with prebuilt binaries for Linux, macOS, and Windows on x64 and
   arm64.
+
+## Payload threads
+
+Large files use multiple CPU cores automatically. Use `--threads N` or `-t N` (0–32)
+to set a worker limit; `0` selects available parallelism and `1` runs
+sequentially. This global option also works with the legacy asymmetric commands.
+
+```bash
+fcrypt encrypt archive.tar --threads 4
+fcrypt decrypt archive.tar.bin --threads 4
+fcrypt encrypt archive.tar --threads 1
+```
+
+The actual worker count is limited by the number of chunks and a 64 MiB
+budget for parallel chunk buffers (input and output combined). Existing I/O
+buffers, worker stacks, and the password KDF allocation are additional.
+Large chunks that cannot fit multiple workers use the sequential path.
+Reading, ordered writing, and progress reporting stay on the calling thread.
+Argon2 parameters and signature hashing are unchanged; these stages and disk
+throughput may limit overall speedup.
+
+The library exposes `fcrypt::sym::parallel::with_threads(n, || operation())`
+for synchronous calls. It scopes the setting to the calling thread and restores
+it afterward; it is not inherited by threads created by callers.
 
 ## Security model
 

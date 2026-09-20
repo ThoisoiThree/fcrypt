@@ -42,7 +42,9 @@ fn main() {
         json: cli.json,
         no_progress: cli.no_progress,
     };
-    if let Err(error) = run(cli, options) {
+    if let Err(error) =
+        fcrypt::sym::parallel::with_threads(usize::from(cli.threads), || run(cli, options))
+    {
         output::emit_error(options, &error);
         std::process::exit(1);
     }

@@ -469,6 +469,7 @@ dependencies = [
  "base64",
  "ciborium",
  "clap",
+ "fcrypt-oqs",
  "hex",
  "hkdf",
  "indicatif",
@@ -479,10 +480,29 @@ dependencies = [
  "serde_bytes",
  "serde_json",
  "sha3",
- "fcrypt-oqs",
  "tempfile",
  "thiserror",
  "zeroize",
+]
+
+[[package]]
+name = "fcrypt-oqs"
+version = "0.11.2"
+dependencies = [
+ "cstr_core",
+ "fcrypt-oqs-sys",
+ "libc",
+]
+
+[[package]]
+name = "fcrypt-oqs-sys"
+version = "0.11.2+liboqs-0.15.1"
+dependencies = [
+ "bindgen",
+ "build-deps",
+ "cmake",
+ "libc",
+ "pkg-config",
 ]
 
 [[package]]
@@ -1096,26 +1116,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
-]
-
-[[package]]
-name = "fcrypt-oqs"
-version = "0.11.2"
-dependencies = [
- "cstr_core",
- "libc",
- "fcrypt-oqs-sys",
-]
-
-[[package]]
-name = "fcrypt-oqs-sys"
-version = "0.11.2+liboqs-0.15.1"
-dependencies = [
- "bindgen",
- "build-deps",
- "cmake",
- "libc",
- "pkg-config",
 ]
 
 [[package]]

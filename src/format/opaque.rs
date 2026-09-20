@@ -30,6 +30,7 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::asym::{keys, pqc};
 use crate::error::{AppError, Result};
 use crate::sym::crypto::CryptoConfig;
+use crate::sym::parallel;
 
 pub const FILE_NONCE_LEN: usize = 32;
 pub const SLOT_COUNT: usize = 8;
@@ -880,6 +881,53 @@ where
             .min(u64::try_from(params.chunk_size).map_err(|_| AppError::InputTooLarge)?),
     )
     .map_err(|_| AppError::InputTooLarge)?;
+    let workers = parallel::workers(buffer_len.saturating_add(TAG_LEN), params.chunk_count);
+    if workers > 1 {
+        parallel::ordered(
+            params.chunk_count,
+            workers,
+            |index| {
+                let remaining = params.plaintext_len - index * params.chunk_size as u64;
+                let len = remaining.min(params.chunk_size as u64) as usize;
+                let mut buffer = Zeroizing::new(Vec::new());
+                buffer
+                    .try_reserve_exact(len)
+                    .map_err(|_| AppError::InputTooLarge)?;
+                buffer.resize(len, 0);
+                if read_plaintext_chunk(reader, &mut buffer)? != len {
+                    return Err(AppError::InputChangedDuringProcessing);
+                }
+                Ok(buffer)
+            },
+            |index, buffer| {
+                let len = buffer.len();
+                let ciphertext = encrypt_payload_chunk(
+                    &cipher,
+                    &nonce_base,
+                    &manifest_hash,
+                    PayloadChunkAuth {
+                        chunk_index: index,
+                        plaintext_len: params.plaintext_len,
+                        chunk_count: params.chunk_count,
+                        is_final: index + 1 == params.chunk_count,
+                    },
+                    &buffer,
+                )?;
+                Ok((ciphertext, len))
+            },
+            |(ciphertext, len)| {
+                writer.write_all(&ciphertext)?;
+                on_progress(len as u64);
+                Ok(())
+            },
+        )?;
+        let mut extra = Zeroizing::new([0u8; 1]);
+        if read_plaintext_chunk(reader, extra.as_mut())? != 0 {
+            return Err(AppError::InputChangedDuringProcessing);
+        }
+        writer.flush()?;
+        return Ok(());
+    }
     let mut buffer = Zeroizing::new(Vec::new());
     buffer
         .try_reserve_exact(buffer_len)
@@ -1032,6 +1080,48 @@ where
             true,
         )?;
         on_progress(TAG_LEN as u64);
+        writer.flush()?;
+        return Ok(());
+    }
+
+    let max_plain = params.plaintext_len.min(chunk_size_u64) as usize;
+    let workers = parallel::workers(max_plain.saturating_add(TAG_LEN), params.chunk_count);
+    if workers > 1 {
+        parallel::ordered(
+            params.chunk_count,
+            workers,
+            |index| {
+                let len =
+                    (params.plaintext_len - index * chunk_size_u64).min(chunk_size_u64) as usize;
+                let mut buffer = Zeroizing::new(Vec::new());
+                resize_decryption_buffer(&mut buffer, len + TAG_LEN)?;
+                reader
+                    .read_exact(&mut buffer)
+                    .map_err(|_| params.auth_failure.error())?;
+                Ok(buffer)
+            },
+            |index, mut buffer| {
+                let cipher_len = buffer.len();
+                let nonce = build_payload_nonce(&nonce_base, index);
+                let aad = payload_aad(
+                    &manifest_hash,
+                    index,
+                    params.plaintext_len,
+                    params.chunk_count,
+                    (cipher_len - TAG_LEN) as u64,
+                    index + 1 == params.chunk_count,
+                );
+                cipher
+                    .decrypt_in_place(Nonce::from_slice(&nonce), &aad, &mut *buffer)
+                    .map_err(|_| params.auth_failure.error())?;
+                Ok((buffer, cipher_len))
+            },
+            |(buffer, cipher_len)| {
+                writer.write_all(&buffer)?;
+                on_progress(cipher_len as u64);
+                Ok(())
+            },
+        )?;
         writer.flush()?;
         return Ok(());
     }
@@ -1469,6 +1559,50 @@ mod tests {
         ));
         assert!(buffer.is_empty());
         assert_eq!(buffer.capacity(), 0);
+    }
+
+    #[test]
+    fn parallel_payload_is_byte_identical_and_detects_changed_input() {
+        let file_nonce = [7u8; FILE_NONCE_LEN];
+        let manifest_ciphertext = [11u8; MANIFEST_CIPHERTEXT_LEN];
+        let file_secret = [13u8; KEY_LEN];
+        for len in [0, 1, 64, 65, 64 * 9, 64 * 9 + 13] {
+            let plaintext = vec![42; len];
+            let encrypt = |threads, data: &[u8]| {
+                let mut result = Vec::new();
+                parallel::with_threads(threads, || {
+                    stream_encrypt_payload(
+                        &mut &*data,
+                        &mut result,
+                        PayloadEncryptParams {
+                            file_nonce: &file_nonce,
+                            manifest_ciphertext: &manifest_ciphertext,
+                            plaintext_len: len as u64,
+                            chunk_size: 64,
+                            chunk_count: chunk_count(len as u64, 64).unwrap(),
+                            file_secret: &file_secret,
+                        },
+                        |_| {},
+                    )
+                })?;
+                Ok::<_, AppError>(result)
+            };
+            assert_eq!(
+                encrypt(1, &plaintext).unwrap(),
+                encrypt(4, &plaintext).unwrap()
+            );
+            if len > 64 {
+                assert!(matches!(
+                    encrypt(4, &plaintext[..len - 1]),
+                    Err(AppError::InputChangedDuringProcessing)
+                ));
+                let longer = vec![42; len + 1];
+                assert!(matches!(
+                    encrypt(4, &longer),
+                    Err(AppError::InputChangedDuringProcessing)
+                ));
+            }
+        }
     }
 
     #[test]

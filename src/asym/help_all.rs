@@ -19,8 +19,8 @@ pub const HELP_ALL: &str = r#"fcrypt full help
     fcrypt asym sign <INPUT.bin>
 
 3. Symmetric Mode
-  encrypt and encode are aliases.
-  decrypt and decode are aliases.
+  encrypt, encode, and enc are aliases.
+  decrypt, decode, and dec are aliases.
   Symmetric encryption writes <INPUT>.bin by default.
   There is no separate format flag.
 
@@ -34,7 +34,14 @@ pub const HELP_ALL: &str = r#"fcrypt full help
     Signature: detached ML-DSA-87
     Hash: SHA3 family
 
+  Global -t, --threads <N> controls payload workers for either mode:
+    0 = automatic (default), 1 = sequential, 2..32 = worker limit.
+    Workers are also limited by chunk count and a 64 MiB buffer budget.
+
 5. Commands And Aliases
+  fcrypt -v / -V / --version prints the version.
+  In decrypt commands, -v FILE still selects the verification key.
+  enc / dec also work under asym and assym.
   fcrypt -ha
   fcrypt --help-all
 

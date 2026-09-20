@@ -47,7 +47,14 @@ signed container to unauthenticated decryption. Signed containers created
 before this extension have no authenticated marker and retain their original
 behavior when the sidecar has been removed.
 
-Payload chunks use AES-256-GCM. Chunk nonces are:
+Payload chunks use AES-256-GCM.
+
+Independent chunks may be processed concurrently, but are serialized in their
+original index order. Worker count is runtime-only and is not encoded in the
+manifest. Sequential and parallel processing produce identical payload bytes
+given identical keys, nonces, manifest, and plaintext.
+
+Chunk nonces are:
 
 ```text
 4-byte per-file nonce base || 8-byte big-endian chunk index

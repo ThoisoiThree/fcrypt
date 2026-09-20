@@ -39,6 +39,93 @@ fn deterministic_bytes(len: usize) -> Vec<u8> {
 }
 
 #[test]
+fn parallel_payload_roundtrips_across_thread_counts_and_rejects_tampering() {
+    use fcrypt::sym::parallel::with_threads;
+    let dir = tempdir().unwrap();
+    let input = dir.path().join("input");
+    let encrypted = dir.path().join("encrypted");
+    let output = dir.path().join("output");
+    let original = deterministic_bytes(1024 * 9 + 37);
+    fs::write(&input, &original).unwrap();
+    let config = test_config(1024);
+    for (encrypt_threads, decrypt_threads) in [(1, 4), (4, 1), (4, 3)] {
+        let mut encrypted_progress = 0;
+        with_threads(encrypt_threads, || {
+            encrypt_file(
+                &input,
+                &encrypted,
+                "test-only-password",
+                &config,
+                true,
+                |n| encrypted_progress += n,
+            )
+        })
+        .unwrap();
+        assert_eq!(encrypted_progress, original.len() as u64);
+        with_threads(decrypt_threads, || {
+            decrypt_file(
+                &encrypted,
+                &output,
+                "test-only-password",
+                &config,
+                true,
+                |_| {},
+            )
+        })
+        .unwrap();
+        assert_eq!(fs::read(&output).unwrap(), original);
+    }
+    let valid = fs::read(&encrypted).unwrap();
+    for truncated in [false, true] {
+        let mut damaged = valid.clone();
+        if truncated {
+            damaged.pop();
+        } else {
+            damaged[opaque::PRELUDE_LEN + 1024 + TAG_LEN + 7] ^= 1;
+        }
+        fs::write(&encrypted, damaged).unwrap();
+        let sentinel = b"previous output must survive";
+        fs::write(&output, sentinel).unwrap();
+        assert!(with_threads(4, || decrypt_file(
+            &encrypted,
+            &output,
+            "test-only-password",
+            &config,
+            true,
+            |_| {},
+        ))
+        .is_err());
+        assert_eq!(fs::read(&output).unwrap(), sentinel);
+        let absent = dir.path().join("absent");
+        assert!(with_threads(4, || decrypt_file(
+            &encrypted,
+            &absent,
+            "test-only-password",
+            &config,
+            false,
+            |_| {},
+        ))
+        .is_err());
+        assert!(!absent.exists());
+    }
+}
+
+#[test]
+fn threads_option_parses_and_rejects_invalid_values() {
+    for flag in ["--threads", "-t"] {
+        for threads in ["0", "1", "4", "32"] {
+            let cli = Cli::try_parse_from(["fcrypt", "encrypt", "input", flag, threads]).unwrap();
+            assert_eq!(cli.threads.to_string(), threads);
+            let cli = Cli::try_parse_from(["fcrypt", flag, threads, "decrypt", "input"]).unwrap();
+            assert_eq!(cli.threads.to_string(), threads);
+        }
+        for threads in ["-1", "33", "abc"] {
+            assert!(Cli::try_parse_from(["fcrypt", flag, threads, "encrypt", "input"]).is_err());
+        }
+    }
+}
+
+#[test]
 fn encrypt_decrypt_roundtrip_small_file() {
     let dir = tempdir().expect("tempdir must be created");
     let input = dir.path().join("small.bin");
@@ -368,6 +455,26 @@ fn decryption_output_paths_preserve_non_utf8_file_names() {
 
 #[test]
 fn cli_aliases_parse_to_same_commands() {
+    assert!(matches!(
+        Cli::parse_from(["fcrypt", "enc", "input"]).command,
+        CliCommand::Encrypt(_)
+    ));
+    let dec = Cli::parse_from(["fcrypt", "dec", "input", "-v", "signer.pub"]);
+    assert!(
+        matches!(dec.command, CliCommand::Decrypt(args) if args.verify == Some(PathBuf::from("signer.pub")))
+    );
+    for group in ["asym", "assym"] {
+        assert!(matches!(
+            Cli::parse_from(["fcrypt", group, "enc", "input"]).command,
+            CliCommand::Asym {
+                command: AssymCommand::Encrypt(_)
+            }
+        ));
+        assert!(matches!(
+            Cli::parse_from(["fcrypt", group, "dec", "input", "-v", "signer.pub"]).command,
+            CliCommand::Asym { command: AssymCommand::Decrypt(args) } if args.verify == Some(PathBuf::from("signer.pub"))
+        ));
+    }
     let encrypt = Cli::parse_from(["fcrypt", "encrypt", "notes.txt"]);
     let encode = Cli::parse_from(["fcrypt", "encode", "notes.txt"]);
     assert!(matches!(encrypt.command, CliCommand::Encrypt(_)));
@@ -392,6 +499,19 @@ fn cli_aliases_parse_to_same_commands() {
             command: AssymCommand::Encrypt(_)
         }
     ));
+}
+
+#[test]
+fn cli_version_aliases_print_the_same_version() {
+    for flag in ["-v", "-V", "--version"] {
+        AssertCommand::cargo_bin("fcrypt")
+            .unwrap()
+            .arg(flag)
+            .assert()
+            .success()
+            .stdout(format!("fcrypt {}\n", env!("CARGO_PKG_VERSION")))
+            .stderr("");
+    }
 }
 
 #[test]
@@ -476,13 +596,16 @@ fn unified_password_cli_supports_output_and_json() {
     let encrypted = dir.path().join("cipher.bin");
     let decrypted = dir.path().join("plain.txt");
     let password = dir.path().join("password.txt");
-    fs::write(&input, b"unified password cli").expect("input must be written");
+    let original = deterministic_bytes(2 * fcrypt::sym::crypto::DEFAULT_CHUNK_SIZE + 37);
+    fs::write(&input, &original).expect("input must be written");
     fs::write(&password, b"test password\n").expect("password must be written");
 
     let output = AssertCommand::cargo_bin("fcrypt")
         .expect("binary must build")
         .args([
             "--json",
+            "--threads",
+            "4",
             "encrypt",
             input.to_str().expect("input path must be utf-8"),
             "--output",
@@ -511,12 +634,15 @@ fn unified_password_cli_supports_output_and_json() {
             "--password-file",
             password.to_str().expect("password path must be utf-8"),
             "--quiet",
+            "--threads",
+            "2",
         ])
         .assert()
-        .success();
+        .success()
+        .stdout("");
     assert_eq!(
         fs::read(&decrypted).expect("decrypted file must read"),
-        b"unified password cli"
+        original
     );
 }
 

@@ -4,10 +4,10 @@ use std::path::PathBuf;
 #[derive(Debug, Subcommand)]
 pub enum AssymCommand {
     /// Encrypt a file into the asymmetric opaque format.
-    #[command(visible_alias = "encode")]
+    #[command(visible_aliases = ["encode", "enc"])]
     Encrypt(AssymEncryptArgs),
     /// Decrypt an asymmetric opaque file.
-    #[command(visible_alias = "decode")]
+    #[command(visible_aliases = ["decode", "dec"])]
     Decrypt(AssymDecryptArgs),
     /// Create a detached signature for an encrypted file.
     Sign(AssymSignArgs),
