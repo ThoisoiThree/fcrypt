@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
 
 use crate::error::{AppError, Result};
+use crate::sym::cleanup::TrackedTempFile;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SignatureSection {
@@ -32,12 +33,12 @@ pub struct DetachedSignature {
 
 pub(crate) struct StagedFile {
     output_path: PathBuf,
-    temp_file: NamedTempFile,
+    temp_file: TrackedTempFile,
     allow_overwrite: Option<bool>,
 }
 
 impl StagedFile {
-    pub(crate) fn new(temp_file: NamedTempFile, output_path: &Path) -> Self {
+    pub(crate) fn new(temp_file: TrackedTempFile, output_path: &Path) -> Self {
         Self {
             output_path: output_path.to_path_buf(),
             temp_file,
@@ -124,7 +125,7 @@ pub fn output_parent_dir(output_path: &Path) -> PathBuf {
 }
 
 pub fn persist_temp_file(
-    temp_file: NamedTempFile,
+    temp_file: TrackedTempFile,
     output_path: &Path,
     allow_overwrite: bool,
 ) -> Result<()> {
@@ -181,30 +182,27 @@ pub(crate) fn persist_staged_files(
     let mut committed = Vec::with_capacity(pending.len());
     for (staged, backup, existed) in pending {
         let output_path = staged.output_path.clone();
-        let persist_result = if existed {
-            staged.temp_file.persist(&output_path)
-        } else {
-            staged.temp_file.persist_noclobber(&output_path)
-        };
-        if let Err(error) = persist_result {
+        if let Err(error) = staged.temp_file.persist(&output_path, existed) {
             if let Err(rollback_error) = rollback_committed_files(committed) {
                 return Err(AppError::Io(io::Error::new(
                     rollback_error.kind(),
                     format!(
                         "failed to publish {}: {}; rollback also failed: {}",
                         output_path.display(),
-                        error.error,
+                        error,
                         rollback_error
                     ),
                 )));
             }
-            return Err(map_persist_error(error.error, output_path));
+            return Err(map_persist_error(error, output_path));
         }
         committed.push((output_path, backup));
     }
     Ok(())
 }
 
+/// Backups are deliberately untracked by the interrupt handler: they may be
+/// the only copy of a replaced file and must survive an interrupted rollback.
 fn stage_backup(path: &Path) -> Result<NamedTempFile> {
     let metadata = fs::metadata(path)?;
     let mut backup = NamedTempFile::new_in(output_parent_dir(path))?;
@@ -333,7 +331,7 @@ mod tests {
         let dir = tempdir().expect("temporary directory must be created");
         let key_path = dir.path().join("identity.sec");
         fs::write(&key_path, b"existing key").expect("key must be written");
-        let staged = StagedFile::new(NamedTempFile::new_in(dir.path()).unwrap(), &key_path)
+        let staged = StagedFile::new(TrackedTempFile::new_in(dir.path()).unwrap(), &key_path)
             .with_overwrite(false);
         assert!(matches!(
             persist_staged_files(vec![staged], true),

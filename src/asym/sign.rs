@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use crate::asym::cli::AssymSignArgs;
 use crate::asym::{envelope, keys, pqc};
 use crate::error::{AppError, Result};
-use crate::sym::pathing;
+use crate::sym::{input, pathing};
 
 const OPAQUE_SIGNATURE_DOMAIN: &str = "fcrypt opaque detached signature v1";
 pub const MAX_DETACHED_SIGNATURE_FILE_BYTES: u64 = 64 * 1024;
@@ -42,8 +42,7 @@ pub fn sign_file(args: &AssymSignArgs) -> Result<SignOutcome> {
         ));
     }
 
-    let mut input = File::open(&args.input)?;
-    let input_len = input.metadata()?.len();
+    let (mut input, input_len) = input::open_regular_file(&args.input)?;
     let keys_dir = args
         .keys_dir
         .clone()
@@ -119,8 +118,7 @@ pub fn verify_file(input: &Path, verify_key: &Path) -> Result<VerifyOutcome> {
     let public_key = keys::read_signing_public_key(verify_key)?;
     let signer_key_id = public_key.key_id.clone();
     let signer_key_expired = public_key.is_expired();
-    let mut file = File::open(input)?;
-    let input_len = file.metadata()?.len();
+    let (mut file, input_len) = input::open_regular_file(input)?;
     verify_detached_signature(input, &public_key, &mut file, input_len)?;
     Ok(VerifyOutcome {
         signer_key_id,

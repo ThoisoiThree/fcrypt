@@ -17,7 +17,7 @@ use fcrypt::error::{AppError, Result};
 use fcrypt::keygen;
 use fcrypt::output::{self, OperationReport, OutputOptions};
 use fcrypt::sym::crypto::CryptoConfig;
-use fcrypt::sym::{file_ops, overwrite, password_file, pathing, progress, prompt};
+use fcrypt::sym::{file_ops, input, overwrite, password_file, pathing, progress, prompt};
 
 fn main() {
     let args = normalized_args();
@@ -42,6 +42,10 @@ fn main() {
         json: cli.json,
         no_progress: cli.no_progress,
     };
+    if let Err(error) = fcrypt::sym::cleanup::install_interrupt_handler() {
+        output::emit_error(options, &AppError::Io(error));
+        std::process::exit(1);
+    }
     if let Err(error) =
         fcrypt::sym::parallel::with_threads(usize::from(cli.threads), || run(cli, options))
     {
@@ -121,6 +125,7 @@ Compatibility commands remain available:
 
 fn run_encrypt(args: EncryptArgs, config: &CryptoConfig, options: OutputOptions) -> Result<()> {
     let input = args.input_path()?;
+    input::reject_non_regular_file(&input)?;
     let output = args
         .output
         .clone()
@@ -259,6 +264,7 @@ fn run_pqc_encrypt(
 
 fn run_decrypt(args: DecryptArgs, config: &CryptoConfig, options: OutputOptions) -> Result<()> {
     let input = args.input_path()?;
+    input::reject_non_regular_file(&input)?;
     let output = args
         .output
         .clone()

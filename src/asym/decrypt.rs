@@ -1,14 +1,14 @@
 use std::fs::{self, File};
 use std::io::{self, BufReader, Read, Seek, SeekFrom};
 use std::path::PathBuf;
-use tempfile::NamedTempFile;
 
 use crate::asym::cli::AssymDecryptArgs;
 use crate::asym::{envelope, keys, pqc, sign};
 use crate::error::{AppError, Result};
 use crate::format::opaque;
+use crate::sym::cleanup::TrackedTempFile;
 use crate::sym::crypto::DEFAULT_CHUNK_SIZE;
-use crate::sym::pathing;
+use crate::sym::{input, pathing};
 
 pub fn decrypt_file<F>(args: &AssymDecryptArgs, on_progress: F) -> Result<PathBuf>
 where
@@ -42,8 +42,7 @@ where
         return Err(AppError::OutputExists(output));
     }
 
-    let mut input_file = File::open(&args.input)?;
-    let encrypted_len = input_file.metadata()?.len();
+    let (mut input_file, encrypted_len) = input::open_regular_file(&args.input)?;
     let verification_key = resolve_verification_key(args)?;
     let signer_key_expired = verification_key
         .as_ref()
@@ -92,7 +91,7 @@ where
 {
     let output_dir = envelope::output_parent_dir(output);
     fs::create_dir_all(&output_dir)?;
-    let mut temp_output = NamedTempFile::new_in(&output_dir)?;
+    let mut temp_output = TrackedTempFile::new_in(&output_dir)?;
     let metadata;
     {
         let mut reader = BufReader::with_capacity(DEFAULT_CHUNK_SIZE.max(64 * 1024), input_file);

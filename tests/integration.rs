@@ -27,6 +27,7 @@ use fcrypt::sym::pathing::{
     asym_default_keys_dir_for_plain_input, asym_encryption_output_path, decryption_output_path,
     encryption_output_path,
 };
+use predicates::prelude::PredicateBooleanExt;
 use predicates::str::contains;
 use tempfile::tempdir;
 
@@ -1969,4 +1970,219 @@ fn legacy_empty_file_without_tag_is_rejected() {
         !decrypted.exists(),
         "decrypted output must not be finalized"
     );
+}
+
+#[cfg(unix)]
+fn staged_temp_files(dir: &Path) -> Vec<PathBuf> {
+    fs::read_dir(dir)
+        .expect("directory must be readable")
+        .map(|entry| entry.expect("entry must be readable").path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(".tmp"))
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+#[test]
+fn non_regular_input_is_rejected_before_password_prompt() {
+    let dir = tempdir().expect("tempdir must be created");
+    let fifo = dir.path().join("pipe");
+    let status = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("mkfifo must run");
+    assert!(status.success());
+
+    for command in ["encrypt", "decrypt"] {
+        AssertCommand::cargo_bin("fcrypt")
+            .expect("binary must build")
+            .arg(command)
+            .arg(&fifo)
+            .write_stdin("never read password\n")
+            .timeout(std::time::Duration::from_secs(60))
+            .assert()
+            .failure()
+            .stderr(contains("not a regular file"))
+            .stderr(contains("assword").not());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn non_regular_inputs_are_rejected_without_output() {
+    let dir = tempdir().expect("tempdir must be created");
+    let fifo = dir.path().join("pipe");
+    let status = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("mkfifo must run");
+    assert!(status.success());
+    let directory = dir.path().join("folder");
+    fs::create_dir(&directory).expect("directory must be created");
+    let password = dir.path().join("password.txt");
+    fs::write(&password, b"test password\n").expect("password must be written");
+
+    for input in [&fifo, &directory] {
+        let output = dir.path().join("out.bin");
+        let stdout = AssertCommand::cargo_bin("fcrypt")
+            .expect("binary must build")
+            .args(["--json", "encrypt"])
+            .arg(input)
+            .arg("--output")
+            .arg(&output)
+            .arg("--password-file")
+            .arg(&password)
+            .timeout(std::time::Duration::from_secs(60))
+            .assert()
+            .failure()
+            .get_output()
+            .stdout
+            .clone();
+        let report: serde_json::Value =
+            serde_json::from_slice(&stdout).expect("JSON error must parse");
+        assert_eq!(report["error"]["kind"], "invalid_argument");
+        assert!(report["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("not a regular file")));
+        assert!(!output.exists());
+
+        let error = encrypt_file(
+            input,
+            &output,
+            "test password",
+            &test_config(64),
+            false,
+            |_| {},
+        )
+        .expect_err("library encryption must reject non-regular input");
+        assert!(matches!(error, AppError::InputNotRegularFile(_)));
+        let error = decrypt_file(
+            input,
+            &output,
+            "test password",
+            &test_config(64),
+            false,
+            |_| {},
+        )
+        .expect_err("library decryption must reject non-regular input");
+        assert!(matches!(error, AppError::InputNotRegularFile(_)));
+        assert!(!output.exists());
+        assert!(staged_temp_files(dir.path()).is_empty());
+    }
+}
+
+#[cfg(all(unix, feature = "pqc"))]
+#[test]
+fn asymmetric_commands_reject_non_regular_inputs() {
+    let dir = tempdir().expect("tempdir must be created");
+    let fifo = dir.path().join("pipe.bin");
+    let status = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("mkfifo must run");
+    assert!(status.success());
+    let keys_dir = dir.path().join("keys");
+    let generated = keys::generate_named_key_pair_files(&keys_dir, "alice", None, false)
+        .expect("keys must be generated");
+    let output = dir.path().join("out");
+
+    let Err(error) = asym::encrypt::encrypt_file(
+        &AssymEncryptArgs {
+            input: fifo.clone(),
+            output: Some(output.clone()),
+            recipient_public: Some(generated.recipient_public_path),
+            keys_dir: None,
+            sign: false,
+            sign_key: None,
+            force: false,
+        },
+        &test_config(64),
+        |_| {},
+    ) else {
+        panic!("PQC encryption must reject non-regular input");
+    };
+    assert!(matches!(error, AppError::InputNotRegularFile(_)));
+
+    let error = asym::decrypt::decrypt_file(
+        &AssymDecryptArgs {
+            input: fifo.clone(),
+            output: Some(output.clone()),
+            identity: Some(generated.recipient_secret_path),
+            keys_dir: None,
+            verify: None,
+            require_signature: false,
+            force: false,
+        },
+        |_| {},
+    )
+    .expect_err("PQC decryption must reject non-regular input");
+    assert!(matches!(error, AppError::InputNotRegularFile(_)));
+
+    let Err(error) = asym::sign::verify_file(&fifo, &generated.signing_public_path) else {
+        panic!("verification must reject non-regular input");
+    };
+    assert!(matches!(error, AppError::InputNotRegularFile(_)));
+    assert!(!output.exists());
+    assert!(staged_temp_files(dir.path()).is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn interrupted_decryption_removes_staged_plaintext() {
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    let dir = tempdir().expect("tempdir must be created");
+    let input = dir.path().join("input.dat");
+    let encrypted = dir.path().join("input.dat.bin");
+    let decrypted = dir.path().join("decrypted.dat");
+    let password = dir.path().join("password.txt");
+    fs::write(&input, deterministic_bytes(64 * 1024 * 1024)).expect("input must be written");
+    fs::write(&password, b"test password\n").expect("password must be written");
+    encrypt_file(
+        &input,
+        &encrypted,
+        "test password",
+        &CryptoConfig::default(),
+        false,
+        |_| {},
+    )
+    .expect("fixture must encrypt");
+
+    let mut child = Command::new(assert_cmd::cargo::cargo_bin("fcrypt"))
+        .args(["--quiet", "--threads", "1", "decrypt"])
+        .arg(&encrypted)
+        .arg("--output")
+        .arg(&decrypted)
+        .arg("--password-file")
+        .arg(&password)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("decryption must start");
+
+    // The staged output exists from before key derivation until publication.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while staged_temp_files(dir.path()).is_empty() {
+        assert!(
+            child.try_wait().expect("child status must read").is_none(),
+            "decryption finished before it could be interrupted"
+        );
+        assert!(Instant::now() < deadline, "staged output never appeared");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let status = Command::new("kill")
+        .args(["-TERM", &child.id().to_string()])
+        .status()
+        .expect("kill must run");
+    assert!(status.success());
+    let output = child.wait_with_output().expect("child must exit");
+
+    assert_eq!(output.status.code(), Some(130));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Interrupted"));
+    assert!(staged_temp_files(dir.path()).is_empty());
+    assert!(!decrypted.exists());
 }

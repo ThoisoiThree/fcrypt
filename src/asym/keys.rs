@@ -1,3 +1,4 @@
+use crate::sym::cleanup::TrackedTempFile;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use rand::rngs::OsRng;
 use rand::RngCore;
@@ -8,7 +9,6 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tempfile::NamedTempFile;
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::asym::{envelope, pqc};
@@ -655,7 +655,7 @@ pub(crate) fn stage_json_file<T: Serialize>(
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
     fs::create_dir_all(&dir)?;
-    let mut temp = NamedTempFile::new_in(&dir)?;
+    let mut temp = TrackedTempFile::new_in(&dir)?;
     serde_json::to_writer_pretty(temp.as_file_mut(), value)
         .map_err(|e| AppError::Serialization(e.to_string()))?;
     temp.as_file_mut().write_all(b"\n")?;

@@ -1,14 +1,14 @@
-use std::fs::{self, File};
+use std::fs;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
-use tempfile::NamedTempFile;
 
 use crate::asym::cli::AssymEncryptArgs;
 use crate::asym::{envelope, keys, pqc, sign};
 use crate::error::{AppError, Result};
 use crate::format::opaque;
+use crate::sym::cleanup::TrackedTempFile;
 use crate::sym::crypto::CryptoConfig;
-use crate::sym::pathing;
+use crate::sym::{input, pathing};
 
 pub struct EncryptOutcome {
     pub output: PathBuf,
@@ -78,8 +78,7 @@ where
 
     // Open the input before generating keys. Keys remain staged until every
     // output, including the detached signature, is ready to commit.
-    let input_file = File::open(&args.input)?;
-    let plaintext_len = input_file.metadata()?.len();
+    let (input_file, plaintext_len) = input::open_regular_file(&args.input)?;
     // opaque owns a zeroizing plaintext chunk buffer. Reading directly from
     // the file avoids retaining another plaintext copy in BufReader.
     let mut reader = input_file;
@@ -144,7 +143,7 @@ where
 
     let output_dir = envelope::output_parent_dir(&output);
     fs::create_dir_all(&output_dir)?;
-    let mut temp_output = NamedTempFile::new_in(&output_dir)?;
+    let mut temp_output = TrackedTempFile::new_in(&output_dir)?;
     {
         let writer_capacity = chunk_size
             .checked_add(opaque::TAG_LEN)

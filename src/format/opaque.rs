@@ -858,6 +858,12 @@ where
     let mut bytes_read_total = 0u64;
 
     if params.plaintext_len == 0 {
+        // The declared length comes from file metadata. Refuse to publish an
+        // empty container if the reader actually has data.
+        let mut extra = Zeroizing::new([0u8; 1]);
+        if read_plaintext_chunk(reader, extra.as_mut())? != 0 {
+            return Err(AppError::InputChangedDuringProcessing);
+        }
         let ciphertext = encrypt_payload_chunk(
             &cipher,
             &nonce_base,
@@ -1602,6 +1608,33 @@ mod tests {
                     Err(AppError::InputChangedDuringProcessing)
                 ));
             }
+        }
+    }
+
+    #[test]
+    fn empty_declared_length_rejects_reader_with_data() {
+        for threads in [1, 4] {
+            let mut encrypted = Vec::new();
+            let result = parallel::with_threads(threads, || {
+                stream_encrypt_payload(
+                    &mut b"unexpected data".as_slice(),
+                    &mut encrypted,
+                    PayloadEncryptParams {
+                        file_nonce: &[7u8; FILE_NONCE_LEN],
+                        manifest_ciphertext: &[11u8; MANIFEST_CIPHERTEXT_LEN],
+                        plaintext_len: 0,
+                        chunk_size: 64,
+                        chunk_count: 1,
+                        file_secret: &[13u8; KEY_LEN],
+                    },
+                    |_| {},
+                )
+            });
+            assert!(matches!(
+                result,
+                Err(AppError::InputChangedDuringProcessing)
+            ));
+            assert!(encrypted.is_empty());
         }
     }
 

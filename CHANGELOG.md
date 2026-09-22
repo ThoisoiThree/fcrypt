@@ -17,6 +17,19 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   1 = sequential), for password and PQC encryption/decryption.
   Opaque v1 files, nonces, authentication data, and Argon2 parameters are unchanged.
 
+### Security
+
+- Reject inputs that are not regular files (FIFOs, `/dev/stdin`, process
+  substitution, directories, devices) for encryption, decryption, signing,
+  and verification, before prompting for a password. Previously a pipe reported a length of zero and was
+  silently encrypted as an empty file. Encryption now also refuses to
+  publish an empty container if the input still has data.
+- Remove staged output files, including partially decrypted plaintext, when
+  the process receives SIGINT, SIGTERM, SIGHUP, or Ctrl-C; the process then
+  exits with status 130. Rollback recovery backups are intentionally kept.
+- Release builds now unwind on panic instead of aborting, so staged
+  temporary files are cleaned up by their destructors.
+
 ## [0.3.5] - 2026-09-20
 
 ### Added

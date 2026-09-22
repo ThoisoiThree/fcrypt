@@ -9,6 +9,9 @@ pub enum AppError {
     #[error("I/O error: {0}")]
     Io(#[from] io::Error),
 
+    #[error("Input is not a regular file: {0}")]
+    InputNotRegularFile(PathBuf),
+
     #[error("The input path does not have a valid file name: {0}")]
     MissingFileName(PathBuf),
 

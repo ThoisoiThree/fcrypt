@@ -110,7 +110,7 @@ pub fn emit_error(options: OutputOptions, error: &AppError) {
 fn error_kind(error: &AppError) -> &'static str {
     match error {
         AppError::Io(_) => "io",
-        AppError::InvalidArgument(_) => "invalid_argument",
+        AppError::InvalidArgument(_) | AppError::InputNotRegularFile(_) => "invalid_argument",
         AppError::OutputExists(_) | AppError::OutputExistsNonInteractive(_) => "output_exists",
         AppError::PasswordMismatch | AppError::EmptyPassword => "password",
         AppError::DecryptionFailed | AppError::AsymmetricAuthenticationFailed => "authentication",

@@ -1,10 +1,10 @@
-use std::fs::File;
 use std::io::{BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use tempfile::NamedTempFile;
 
 use crate::error::{AppError, Result};
+use crate::sym::cleanup::TrackedTempFile;
 use crate::sym::crypto::{self, CryptoConfig};
+use crate::sym::input;
 
 pub fn encrypt_file<F>(
     input_path: &Path,
@@ -21,14 +21,13 @@ where
         return Err(AppError::OutputExists(output_path.to_path_buf()));
     }
 
-    let input_file = File::open(input_path)?;
-    let input_len = input_file.metadata()?.len();
+    let (input_file, input_len) = input::open_regular_file(input_path)?;
     // The stream encryptor owns a zeroizing plaintext chunk buffer. Avoid a
     // second, non-zeroizing plaintext copy in BufReader.
     let mut reader = input_file;
 
     let output_dir = output_parent_dir(output_path);
-    let mut temp_output = NamedTempFile::new_in(output_dir)?;
+    let mut temp_output = TrackedTempFile::new_in(&output_dir)?;
     {
         let writer_capacity = config
             .chunk_size
@@ -66,13 +65,12 @@ where
         return Err(AppError::OutputExists(output_path.to_path_buf()));
     }
 
-    let input_file = File::open(input_path)?;
-    let input_len = input_file.metadata()?.len();
+    let (input_file, input_len) = input::open_regular_file(input_path)?;
     let reader_capacity = config.chunk_size.max(64 * 1024);
     let mut reader = BufReader::with_capacity(reader_capacity, input_file);
 
     let output_dir = output_parent_dir(output_path);
-    let mut temp_output = NamedTempFile::new_in(output_dir)?;
+    let mut temp_output = TrackedTempFile::new_in(&output_dir)?;
     // Write plaintext directly to the staged file. The stream decryptor
     // zeroizes its authenticated chunk before returning on every path.
     crypto::decrypt_stream(
@@ -89,23 +87,19 @@ where
 }
 
 fn persist_temp_file(
-    temp_file: NamedTempFile,
+    temp_file: TrackedTempFile,
     output_path: &Path,
     allow_overwrite: bool,
 ) -> Result<()> {
-    let result = if allow_overwrite {
-        temp_file.persist(output_path)
-    } else {
-        temp_file.persist_noclobber(output_path)
-    };
-
-    result.map(|_| ()).map_err(|e| {
-        if e.error.kind() == std::io::ErrorKind::AlreadyExists {
-            AppError::OutputExists(output_path.to_path_buf())
-        } else {
-            AppError::Io(e.error)
-        }
-    })
+    temp_file
+        .persist(output_path, allow_overwrite)
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                AppError::OutputExists(output_path.to_path_buf())
+            } else {
+                AppError::Io(error)
+            }
+        })
 }
 
 fn output_parent_dir(output_path: &Path) -> PathBuf {
@@ -128,8 +122,9 @@ mod tests {
         std::fs::write(&output, b"old").expect("existing output must be written");
 
         let mut temp_output =
-            NamedTempFile::new_in(dir.path()).expect("temp output must be created");
+            TrackedTempFile::new_in(dir.path()).expect("temp output must be created");
         temp_output
+            .as_file_mut()
             .write_all(b"new")
             .expect("temp output must be written");
 
@@ -150,8 +145,9 @@ mod tests {
         std::fs::write(&output, b"old").expect("existing output must be written");
 
         let mut temp_output =
-            NamedTempFile::new_in(dir.path()).expect("temp output must be created");
+            TrackedTempFile::new_in(dir.path()).expect("temp output must be created");
         temp_output
+            .as_file_mut()
             .write_all(b"new")
             .expect("temp output must be written");
 
