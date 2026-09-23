@@ -291,6 +291,29 @@ fcrypt encrypt report.pdf --password-file ./fcrypt-password.txt --json
 fcrypt decrypt report.pdf.bin --password-file ./fcrypt-password.txt --quiet
 ```
 
+Any file can serve as the key instead of a password. Its full contents are
+hashed with SHA3-256 (binary files are fine, nothing is trimmed), so the
+container format is unchanged. fcrypt then asks for an optional password: press
+Enter to use the key file alone, or type a password (confirmed on encryption)
+to require both the file and the password for decryption:
+
+```bash
+fcrypt encrypt report.pdf --key-file ./photo.jpg
+fcrypt decrypt report.pdf.bin -K ./photo.jpg
+```
+
+Without an interactive terminal no password is asked for; to combine a key file
+with a password in scripts, add `--password-file`:
+
+```bash
+fcrypt encrypt report.pdf -K ./photo.jpg --password-file ./fcrypt-password.txt
+```
+
+Keep the key file byte-for-byte identical: any change, including re-saving or
+metadata edits, makes the ciphertext undecryptable. Empty files, directories,
+and the operation's own input or output are rejected. `--key-file` cannot be
+combined with recipient-key options.
+
 `--json` emits one machine-readable result to stdout. `--quiet` suppresses
 normal success messages and progress, while `--no-progress` keeps final output
 but hides progress indicators. Passwords must never be supplied as command-line

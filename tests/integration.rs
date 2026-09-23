@@ -590,6 +590,379 @@ fn empty_password_file_is_rejected() {
     assert!(matches!(err, AppError::EmptyPassword));
 }
 
+fn fcrypt_cmd() -> AssertCommand {
+    AssertCommand::cargo_bin("fcrypt").expect("binary must build")
+}
+
+fn path_str(path: &Path) -> &str {
+    path.to_str().expect("test path must be utf-8")
+}
+
+#[test]
+fn binary_key_file_roundtrips_with_long_and_short_options_without_password() {
+    let dir = tempdir().expect("tempdir must be created");
+    let input = dir.path().join("input.txt");
+    let encrypted = dir.path().join("cipher.bin");
+    let decrypted = dir.path().join("plain.txt");
+    let key = dir.path().join("photo.jpg");
+    let original = deterministic_bytes(fcrypt::sym::crypto::DEFAULT_CHUNK_SIZE + 11);
+    fs::write(&input, &original).expect("input must be written");
+    let key_bytes: Vec<u8> = (0..=255u8).cycle().take(300_000).collect();
+    fs::write(&key, &key_bytes).expect("key must be written");
+
+    let output = fcrypt_cmd()
+        .args([
+            "--json",
+            "encrypt",
+            path_str(&input),
+            "-o",
+            path_str(&encrypted),
+            "--key-file",
+            path_str(&key),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let report: serde_json::Value =
+        serde_json::from_slice(&output).expect("JSON output must parse");
+    assert_eq!(report["operation"], "encrypt");
+    assert_eq!(report["mode"], "key_file");
+
+    fcrypt_cmd()
+        .args([
+            "decrypt",
+            path_str(&encrypted),
+            "-o",
+            path_str(&decrypted),
+            "-K",
+            path_str(&key),
+            "--quiet",
+        ])
+        .assert()
+        .success()
+        .stdout("");
+    assert_eq!(fs::read(&decrypted).expect("plaintext must read"), original);
+}
+
+#[test]
+fn key_file_ciphertext_uses_the_unchanged_password_format() {
+    use sha3::{Digest, Sha3_256};
+
+    let dir = tempdir().expect("tempdir must be created");
+    let input = dir.path().join("input.txt");
+    let encrypted = dir.path().join("input.txt.bin");
+    let decrypted = dir.path().join("plain.txt");
+    let key = dir.path().join("key.bin");
+    let password = dir.path().join("password.txt");
+    fs::write(&input, b"same format").expect("input must be written");
+    fs::write(&key, b"\x00\x01binary key\r\n").expect("key must be written");
+    let mut hasher = Sha3_256::new();
+    hasher.update(b"fcrypt key-file v1\0");
+    hasher.update(b"\x00\x01binary key\r\n");
+    fs::write(&password, hex::encode(hasher.finalize())).expect("password must be written");
+
+    fcrypt_cmd()
+        .args(["-q", "enc", path_str(&input), "-K", path_str(&key)])
+        .assert()
+        .success();
+    fcrypt_cmd()
+        .args([
+            "-q",
+            "decrypt",
+            path_str(&encrypted),
+            "-o",
+            path_str(&decrypted),
+            "--password-file",
+            path_str(&password),
+        ])
+        .assert()
+        .success();
+    assert_eq!(
+        fs::read(&decrypted).expect("plaintext must read"),
+        b"same format"
+    );
+}
+
+#[test]
+fn wrong_key_file_fails_without_plaintext_output() {
+    let dir = tempdir().expect("tempdir must be created");
+    let input = dir.path().join("input.txt");
+    let encrypted = dir.path().join("cipher.bin");
+    let decrypted = dir.path().join("plain.txt");
+    let key = dir.path().join("key");
+    let other = dir.path().join("other");
+    fs::write(&input, b"secret").expect("input must be written");
+    fs::write(&key, b"key contents").expect("key must be written");
+    fs::write(&other, b"key contents\n").expect("key must be written");
+
+    fcrypt_cmd()
+        .args([
+            "-q",
+            "encrypt",
+            path_str(&input),
+            "-o",
+            path_str(&encrypted),
+        ])
+        .args(["-K", path_str(&key)])
+        .assert()
+        .success();
+    fcrypt_cmd()
+        .args(["decrypt", path_str(&encrypted), "-o", path_str(&decrypted)])
+        .args(["--key-file", path_str(&other)])
+        .assert()
+        .failure()
+        .stderr(contains("Decryption failed"));
+    assert!(!decrypted.exists());
+}
+
+#[test]
+fn empty_missing_or_reused_key_file_is_rejected_before_writing() {
+    let dir = tempdir().expect("tempdir must be created");
+    let input = dir.path().join("input.txt");
+    let encrypted = dir.path().join("cipher.bin");
+    let empty = dir.path().join("empty");
+    fs::write(&input, b"secret").expect("input must be written");
+    fs::write(&empty, b"").expect("key must be written");
+    fs::write(&encrypted, b"existing").expect("output must be written");
+
+    fcrypt_cmd()
+        .args([
+            "encrypt",
+            path_str(&input),
+            "-o",
+            path_str(&encrypted),
+            "-f",
+        ])
+        .args(["-K", path_str(&empty)])
+        .assert()
+        .failure()
+        .stderr(contains("key file is empty"));
+    fcrypt_cmd()
+        .args([
+            "encrypt",
+            path_str(&input),
+            "-o",
+            path_str(&encrypted),
+            "-f",
+        ])
+        .args(["-K", path_str(&dir.path().join("missing"))])
+        .assert()
+        .failure();
+    fcrypt_cmd()
+        .args([
+            "encrypt",
+            path_str(&input),
+            "-o",
+            path_str(&encrypted),
+            "-f",
+        ])
+        .args(["-K", path_str(&encrypted)])
+        .assert()
+        .failure()
+        .stderr(contains("key file must not be the output file"));
+    fcrypt_cmd()
+        .args([
+            "encrypt",
+            path_str(&input),
+            "-o",
+            path_str(&encrypted),
+            "-f",
+        ])
+        .args(["-K", path_str(&input)])
+        .assert()
+        .failure()
+        .stderr(contains("key file must not be the input file"));
+    fcrypt_cmd()
+        .args([
+            "encrypt",
+            path_str(&input),
+            "-o",
+            path_str(&encrypted),
+            "-f",
+        ])
+        .args(["-K", path_str(dir.path())])
+        .assert()
+        .failure();
+    assert_eq!(fs::read(&encrypted).expect("output must read"), b"existing");
+}
+
+#[test]
+fn key_file_mixed_with_password_requires_both_to_decrypt() {
+    let dir = tempdir().expect("tempdir must be created");
+    let input = dir.path().join("input.txt");
+    let encrypted = dir.path().join("cipher.bin");
+    let decrypted = dir.path().join("plain.txt");
+    let key = dir.path().join("key.bin");
+    let password = dir.path().join("password.txt");
+    let wrong_password = dir.path().join("wrong.txt");
+    fs::write(&input, b"mixed secret").expect("input must be written");
+    fs::write(&key, b"\x10\x20 key material").expect("key must be written");
+    fs::write(&password, b"correct horse\n").expect("password must be written");
+    fs::write(&wrong_password, b"correct horse!\n").expect("password must be written");
+
+    let output = fcrypt_cmd()
+        .args([
+            "--json",
+            "encrypt",
+            path_str(&input),
+            "-o",
+            path_str(&encrypted),
+        ])
+        .args(["-K", path_str(&key), "--password-file", path_str(&password)])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let report: serde_json::Value =
+        serde_json::from_slice(&output).expect("JSON output must parse");
+    assert_eq!(report["mode"], "key_file");
+    assert!(!String::from_utf8_lossy(&output).contains("correct horse"));
+
+    // Non-interactive stdin: the optional password is skipped (empty).
+    fcrypt_cmd()
+        .args(["decrypt", path_str(&encrypted), "-o", path_str(&decrypted)])
+        .args(["-K", path_str(&key)])
+        .assert()
+        .failure()
+        .stderr(contains("Decryption failed"));
+    assert!(!decrypted.exists());
+    fcrypt_cmd()
+        .args(["decrypt", path_str(&encrypted), "-o", path_str(&decrypted)])
+        .args(["-K", path_str(&key), "--password-file"])
+        .arg(path_str(&wrong_password))
+        .assert()
+        .failure()
+        .stderr(contains("Decryption failed"));
+    assert!(!decrypted.exists());
+    fcrypt_cmd()
+        .args(["decrypt", path_str(&encrypted), "-o", path_str(&decrypted)])
+        .args(["--password-file", path_str(&password)])
+        .assert()
+        .failure()
+        .stderr(contains("Decryption failed"));
+    assert!(!decrypted.exists());
+
+    fcrypt_cmd()
+        .args([
+            "-q",
+            "decrypt",
+            path_str(&encrypted),
+            "-o",
+            path_str(&decrypted),
+        ])
+        .args([
+            "--key-file",
+            path_str(&key),
+            "--password-file",
+            path_str(&password),
+        ])
+        .assert()
+        .success()
+        .stdout("");
+    assert_eq!(
+        fs::read(&decrypted).expect("plaintext must read"),
+        b"mixed secret"
+    );
+}
+
+#[test]
+fn key_file_without_terminal_skips_the_optional_password() {
+    let dir = tempdir().expect("tempdir must be created");
+    let input = dir.path().join("input.txt");
+    let encrypted = dir.path().join("cipher.bin");
+    let decrypted = dir.path().join("plain.txt");
+    let key = dir.path().join("key");
+    fs::write(&input, b"key only").expect("input must be written");
+    fs::write(&key, b"key only material").expect("key must be written");
+
+    fcrypt_cmd()
+        .args(["encrypt", path_str(&input), "-o", path_str(&encrypted)])
+        .args(["-K", path_str(&key)])
+        .write_stdin("typed password\n")
+        .assert()
+        .success()
+        .stderr(contains("Enter password").not());
+    fcrypt_cmd()
+        .args([
+            "-q",
+            "decrypt",
+            path_str(&encrypted),
+            "-o",
+            path_str(&decrypted),
+        ])
+        .args(["-K", path_str(&key)])
+        .assert()
+        .success();
+    assert_eq!(
+        fs::read(&decrypted).expect("plaintext must read"),
+        b"key only"
+    );
+}
+
+#[test]
+fn key_file_conflicts_with_other_credentials() {
+    for args in [
+        vec![
+            "fcrypt",
+            "encrypt",
+            "in",
+            "--key-file",
+            "k",
+            "--recipient",
+            "r.pub",
+        ],
+        vec![
+            "fcrypt",
+            "encrypt",
+            "in",
+            "--key-file",
+            "k",
+            "--sign-key",
+            "s.sec",
+        ],
+        vec![
+            "fcrypt",
+            "decrypt",
+            "in.bin",
+            "--key-file",
+            "k",
+            "--identity",
+            "i.sec",
+        ],
+        vec![
+            "fcrypt",
+            "decrypt",
+            "in.bin",
+            "--key-file",
+            "k",
+            "--verify",
+            "v.pub",
+        ],
+    ] {
+        assert!(
+            Cli::try_parse_from(&args).is_err(),
+            "{args:?} must conflict"
+        );
+    }
+    let parsed = Cli::parse_from([
+        "fcrypt",
+        "decrypt",
+        "in.bin",
+        "-K",
+        "k",
+        "--password-file",
+        "p",
+    ]);
+    assert!(matches!(
+        parsed.command,
+        CliCommand::Decrypt(ref args)
+            if !args.uses_pqc() && args.key_file.is_some() && args.password_file.is_some()
+    ));
+}
+
 #[test]
 fn unified_password_cli_supports_output_and_json() {
     let dir = tempdir().expect("tempdir must be created");

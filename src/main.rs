@@ -17,7 +17,7 @@ use fcrypt::error::{AppError, Result};
 use fcrypt::keygen;
 use fcrypt::output::{self, OperationReport, OutputOptions};
 use fcrypt::sym::crypto::CryptoConfig;
-use fcrypt::sym::{file_ops, input, overwrite, password_file, pathing, progress, prompt};
+use fcrypt::sym::{file_ops, input, key_file, overwrite, password_file, pathing, progress, prompt};
 
 fn main() {
     let args = normalized_args();
@@ -91,6 +91,9 @@ Password encryption:
   fcrypt encrypt <INPUT> [-o <OUTPUT>]
   fcrypt decrypt <INPUT.bin> [-o <OUTPUT>]
   fcrypt encrypt <INPUT> --password-file <FILE>
+  fcrypt encrypt <INPUT> --key-file <ANY_FILE>      (short: -K; optional password, Enter skips)
+  fcrypt decrypt <INPUT.bin> --key-file <ANY_FILE>
+  fcrypt encrypt <INPUT> -K <ANY_FILE> --password-file <FILE>
 
 Recipient-key encryption:
   fcrypt identity create alice
@@ -134,7 +137,12 @@ fn run_encrypt(args: EncryptArgs, config: &CryptoConfig, options: OutputOptions)
     let allow_overwrite = resolve_overwrite(&output, args.force, options)?;
 
     if !args.uses_pqc() {
-        let (password, warnings) = encryption_password(args.password_file.as_deref())?;
+        let (password, mode, warnings) = encryption_secret(
+            args.password_file.as_deref(),
+            args.key_file.as_deref(),
+            &input,
+            &output,
+        )?;
         let total = fs::metadata(&input)?.len();
         let pb = progress::create_progress(total, "Encrypting", progress_enabled(options));
         let result = file_ops::encrypt_file(
@@ -148,7 +156,7 @@ fn run_encrypt(args: EncryptArgs, config: &CryptoConfig, options: OutputOptions)
         pb.finish();
         result?;
         let mut report = OperationReport::new("encrypt");
-        report.mode = Some("password");
+        report.mode = Some(mode);
         report.input = Some(input.display().to_string());
         report.output = Some(output.display().to_string());
         report.warnings = warnings;
@@ -272,7 +280,12 @@ fn run_decrypt(args: DecryptArgs, config: &CryptoConfig, options: OutputOptions)
         .unwrap_or_else(|| pathing::decryption_output_path(&input))?;
     let allow_overwrite = resolve_overwrite(&output, args.force, options)?;
     if !args.uses_pqc() {
-        let (password, warnings) = decryption_password(args.password_file.as_deref())?;
+        let (password, mode, warnings) = decryption_secret(
+            args.password_file.as_deref(),
+            args.key_file.as_deref(),
+            &input,
+            &output,
+        )?;
         let total = fs::metadata(&input)?.len();
         let pb = progress::create_progress(total, "Decrypting", progress_enabled(options));
         let result = file_ops::decrypt_file(
@@ -286,7 +299,7 @@ fn run_decrypt(args: DecryptArgs, config: &CryptoConfig, options: OutputOptions)
         pb.finish();
         result?;
         let mut report = OperationReport::new("decrypt");
-        report.mode = Some("password");
+        report.mode = Some(mode);
         report.input = Some(input.display().to_string());
         report.output = Some(output.display().to_string());
         report.warnings = warnings;
@@ -629,24 +642,71 @@ fn run_legacy_keygen(args: fcrypt::cli::KeygenArgs, options: OutputOptions) -> R
     }
 }
 
-fn encryption_password(path: Option<&Path>) -> Result<(zeroize::Zeroizing<String>, Vec<String>)> {
-    match path {
-        Some(path) => {
-            let password = password_file::read_password_file(path)?;
-            Ok((password.password, password.warning.into_iter().collect()))
-        }
-        None => Ok((prompt::prompt_password_for_encryption()?, Vec::new())),
-    }
+type SymmetricSecret = (zeroize::Zeroizing<String>, &'static str, Vec<String>);
+
+#[derive(Clone, Copy)]
+enum Direction {
+    Encrypt,
+    Decrypt,
 }
 
-fn decryption_password(path: Option<&Path>) -> Result<(zeroize::Zeroizing<String>, Vec<String>)> {
-    match path {
+fn encryption_secret(
+    password_path: Option<&Path>,
+    key_path: Option<&Path>,
+    input: &Path,
+    output: &Path,
+) -> Result<SymmetricSecret> {
+    symmetric_secret(password_path, key_path, input, output, Direction::Encrypt)
+}
+
+fn decryption_secret(
+    password_path: Option<&Path>,
+    key_path: Option<&Path>,
+    input: &Path,
+    output: &Path,
+) -> Result<SymmetricSecret> {
+    symmetric_secret(password_path, key_path, input, output, Direction::Decrypt)
+}
+
+fn symmetric_secret(
+    password_path: Option<&Path>,
+    key_path: Option<&Path>,
+    input: &Path,
+    output: &Path,
+    direction: Direction,
+) -> Result<SymmetricSecret> {
+    let mut warnings = Vec::new();
+    let Some(key_path) = key_path else {
+        let password = match password_path {
+            Some(path) => {
+                let password = password_file::read_password_file(path)?;
+                warnings.extend(password.warning);
+                password.password
+            }
+            None => match direction {
+                Direction::Encrypt => prompt::prompt_password_for_encryption()?,
+                Direction::Decrypt => prompt::prompt_password_for_decryption()?,
+            },
+        };
+        return Ok((password, "password", warnings));
+    };
+
+    // Validate and hash the key file before asking for the optional password.
+    key_file::reject_key_file_reuse(key_path, input, output)?;
+    let mut key = key_file::read_key_file(key_path)?;
+    warnings.extend(key.warning.take());
+    let password = match password_path {
         Some(path) => {
             let password = password_file::read_password_file(path)?;
-            Ok((password.password, password.warning.into_iter().collect()))
+            warnings.extend(password.warning);
+            password.password
         }
-        None => Ok((prompt::prompt_password_for_decryption()?, Vec::new())),
-    }
+        None => match direction {
+            Direction::Encrypt => prompt::prompt_optional_password_for_encryption()?,
+            Direction::Decrypt => prompt::prompt_optional_password_for_decryption()?,
+        },
+    };
+    Ok((key.slot_password(&password), "key_file", warnings))
 }
 
 fn progress_enabled(options: OutputOptions) -> bool {

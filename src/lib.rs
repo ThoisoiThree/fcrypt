@@ -6,4 +6,4 @@ pub mod keygen;
 pub mod output;
 pub mod sym;
 
-pub use sym::{crypto, file_ops, overwrite, password_file, pathing, progress, prompt};
+pub use sym::{crypto, file_ops, key_file, overwrite, password_file, pathing, progress, prompt};

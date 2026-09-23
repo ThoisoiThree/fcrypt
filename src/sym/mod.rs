@@ -2,6 +2,7 @@ pub mod cleanup;
 pub mod crypto;
 pub mod file_ops;
 pub mod input;
+pub mod key_file;
 pub mod overwrite;
 pub mod parallel;
 pub mod password_file;

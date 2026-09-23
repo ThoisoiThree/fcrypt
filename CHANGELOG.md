@@ -17,6 +17,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   1 = sequential), for password and PQC encryption/decryption.
   Opaque v1 files, nonces, authentication data, and Argon2 parameters are unchanged.
 
+- Added `--key-file FILE` (short form `-K`) to `encrypt` and `decrypt`: any
+  regular file can be used as the symmetric key. fcrypt also asks for an
+  optional password (Enter skips; no prompt without a terminal, or supply it
+  with `--password-file`); a non-empty password is mixed with the file hash.
+  The derived value is used as the slot password, so opaque v1 containers,
+  slots, and Argon2 parameters are unchanged. JSON reports use `mode: "key_file"`.
+
 ### Security
 
 - Reject inputs that are not regular files (FIFOs, `/dev/stdin`, process

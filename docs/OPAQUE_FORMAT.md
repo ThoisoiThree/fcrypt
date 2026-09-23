@@ -37,6 +37,28 @@ ML-KEM-1024 and HQC-256 ciphertexts followed by an AEAD-wrapped manifest key.
 Empty slots are random bytes. The reader tries the supplied password or
 available recipient secret keys against every slot.
 
+Key-file mode (`--key-file` / `-K`) is a client-side password derivation, not
+a new slot type. The CLI hashes the whole key file, byte for byte, optionally
+mixes in a user password, and uses the result as the password for an ordinary
+password slot:
+
+```text
+file_digest = SHA3-256("fcrypt key-file v1" || 0x00 || file bytes)
+
+no password:   slot_password = lowercase_hex(file_digest)
+with password: slot_password = lowercase_hex(SHA3-256(
+                   "fcrypt key-file+password v1" || 0x00
+                   || u64_be(byte_len(password)) || password (UTF-8)
+                   || file_digest))
+```
+
+An empty password selects the first form. The resulting 64-character password
+then goes through the same Argon2id profile above. Containers are
+indistinguishable from password containers, and can also be opened with
+`--password-file` holding that hex string. The domain strings, length prefix,
+digest, and encoding are part of key-file compatibility and must not change in
+place.
+
 For signed PQC containers, the AEAD-protected padding of the matching recipient
 slot carries a `fcrypt-sig-v1` marker and the 32-byte signer key ID. This is a
 backward-compatible opaque v1 extension: it does not change slot sizes, nonces,

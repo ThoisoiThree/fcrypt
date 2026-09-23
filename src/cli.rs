@@ -89,14 +89,14 @@ pub struct EncryptArgs {
         short = 'r',
         visible_alias = "recipient-public",
         value_name = "FILE",
-        conflicts_with_all = ["new_identity", "password_file"]
+        conflicts_with_all = ["new_identity", "password_file", "key_file"]
     )]
     pub recipient: Option<PathBuf>,
     /// Create a named recipient and signing identity, then encrypt for it.
     #[arg(
         long = "new-identity",
         value_name = "NAME",
-        conflicts_with_all = ["recipient", "password_file"]
+        conflicts_with_all = ["recipient", "password_file", "key_file"]
     )]
     pub new_identity: Option<String>,
     /// Directory for a newly created identity.
@@ -104,23 +104,26 @@ pub struct EncryptArgs {
         long = "keys-dir",
         short = 'k',
         value_name = "DIR",
-        conflicts_with = "password_file"
+        conflicts_with_all = ["password_file", "key_file"]
     )]
     pub keys_dir: Option<PathBuf>,
     /// Create a detached signature. Requires --sign-key or --new-identity.
-    #[arg(long, short = 's', conflicts_with = "password_file")]
+    #[arg(long, short = 's', conflicts_with_all = ["password_file", "key_file"])]
     pub sign: bool,
     /// Signing secret key. Implies asymmetric encryption.
     #[arg(
         long = "sign-key",
         short = 'S',
         value_name = "FILE",
-        conflicts_with = "password_file"
+        conflicts_with_all = ["password_file", "key_file"]
     )]
     pub sign_key: Option<PathBuf>,
-    /// Read the password from a file instead of prompting.
+    /// Read the password from a file instead of prompting (with --key-file: the optional password).
     #[arg(long = "password-file", value_name = "FILE", conflicts_with_all = ["recipient", "new_identity", "keys_dir", "sign", "sign_key"])]
     pub password_file: Option<PathBuf>,
+    /// Use any file as the key, combined with an optional password prompt (Enter skips).
+    #[arg(long = "key-file", short = 'K', value_name = "FILE", conflicts_with_all = ["recipient", "new_identity", "keys_dir", "sign", "sign_key"])]
+    pub key_file: Option<PathBuf>,
     /// Overwrite the destination without asking.
     #[arg(long, short = 'f')]
     pub force: bool,
@@ -156,7 +159,7 @@ pub struct DecryptArgs {
         long,
         short = 'i',
         value_name = "FILE",
-        conflicts_with = "password_file"
+        conflicts_with_all = ["password_file", "key_file"]
     )]
     pub identity: Option<PathBuf>,
     /// Directory for recipient secret key auto-discovery.
@@ -164,7 +167,7 @@ pub struct DecryptArgs {
         long = "keys-dir",
         short = 'k',
         value_name = "DIR",
-        conflicts_with = "password_file"
+        conflicts_with_all = ["password_file", "key_file"]
     )]
     pub keys_dir: Option<PathBuf>,
     /// Verify a detached signature with this public key before decrypting.
@@ -172,15 +175,18 @@ pub struct DecryptArgs {
         long,
         short = 'v',
         value_name = "FILE",
-        conflicts_with = "password_file"
+        conflicts_with_all = ["password_file", "key_file"]
     )]
     pub verify: Option<PathBuf>,
     /// Legacy alias for requiring a signature. A verification key is still required.
     #[arg(long = "require-signature", short = 'R', hide = true)]
     pub require_signature: bool,
-    /// Read the password from a file instead of prompting.
+    /// Read the password from a file instead of prompting (with --key-file: the optional password).
     #[arg(long = "password-file", value_name = "FILE", conflicts_with_all = ["identity", "keys_dir", "verify", "require_signature"])]
     pub password_file: Option<PathBuf>,
+    /// Decrypt with the key file (and optional password) used for encryption.
+    #[arg(long = "key-file", short = 'K', value_name = "FILE", conflicts_with_all = ["identity", "keys_dir", "verify", "require_signature"])]
+    pub key_file: Option<PathBuf>,
     /// Overwrite the destination without asking.
     #[arg(long, short = 'f')]
     pub force: bool,

@@ -27,6 +27,33 @@ pub fn prompt_password_for_decryption() -> Result<Zeroizing<String>> {
     Ok(password)
 }
 
+/// Optional password combined with a key file. Enter alone skips it. Without
+/// an interactive stdin no prompt is shown and the password is empty; use
+/// `--password-file` to supply one non-interactively.
+pub fn prompt_optional_password_for_encryption() -> Result<Zeroizing<String>> {
+    if !io::stdin().is_terminal() {
+        return Ok(Zeroizing::new(String::new()));
+    }
+    let password = Zeroizing::new(prompt_password(OPTIONAL_PASSWORD_PROMPT)?);
+    if password.is_empty() {
+        return Ok(password);
+    }
+    let confirmation = Zeroizing::new(prompt_password("Confirm password: ")?);
+    if password.as_str() != confirmation.as_str() {
+        return Err(AppError::PasswordMismatch);
+    }
+    Ok(password)
+}
+
+pub fn prompt_optional_password_for_decryption() -> Result<Zeroizing<String>> {
+    if !io::stdin().is_terminal() {
+        return Ok(Zeroizing::new(String::new()));
+    }
+    Ok(Zeroizing::new(prompt_password(OPTIONAL_PASSWORD_PROMPT)?))
+}
+
+const OPTIONAL_PASSWORD_PROMPT: &str = "Enter password (optional, press Enter to skip): ";
+
 pub fn confirm_overwrite(path: &Path) -> Result<bool> {
     if !io::stdin().is_terminal() {
         return Err(AppError::OutputExistsNonInteractive(path.to_path_buf()));
