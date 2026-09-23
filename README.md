@@ -10,7 +10,7 @@ Use `fcrypt -v`, `fcrypt -V`, or `fcrypt --version` to print the version.
 under `asym`. Existing `encode` and `decode` aliases remain available.
 Within decryption commands, `-v FILE` retains its signature-verification meaning.
 
-`fcrypt` is designed for large files. It processes data as authenticated
+`fcrypt` is designed for large files too. It processes data as authenticated
 chunks, writes outputs through temporary files, and finalizes results only after
 the operation succeeds.
 
