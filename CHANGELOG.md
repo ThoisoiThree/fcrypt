@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.3.6] - 2026-09-24
+
 ### Added
 
 - Added `fcrypt -v` as a version alias and `enc` / `dec` command aliases,
@@ -36,6 +38,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   exits with status 130. Rollback recovery backups are intentionally kept.
 - Release builds now unwind on panic instead of aborting, so staged
   temporary files are cleaned up by their destructors.
+- Continued shipping the vendored liboqs C implementation pinned to commit
+  `282809f06dccf6893980035cb11f319684d10d52` (unchanged from 0.3.5).
 
 ## [0.3.5] - 2026-09-20
 
@@ -191,7 +195,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Safe temp-file output workflow (finalize only after successful operation).
 - Integration tests for roundtrip, edge cases, corruption/truncation, and naming logic.
 
-[Unreleased]: https://github.com/ThoisoiThree/fcrypt/compare/v0.3.5...HEAD
+[Unreleased]: https://github.com/ThoisoiThree/fcrypt/compare/v0.3.6...HEAD
+[0.3.6]: https://github.com/ThoisoiThree/fcrypt/compare/v0.3.5...v0.3.6
 [0.3.5]: https://github.com/ThoisoiThree/fcrypt/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/ThoisoiThree/fcrypt/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/ThoisoiThree/fcrypt/compare/v0.3.2...v0.3.3

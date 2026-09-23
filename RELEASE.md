@@ -1,7 +1,7 @@
 # Release Process
 
 An expanded step-by-step tutorial is available in
-`docs/RELEASING_TUTORIAL.md`.
+`docs/DEPLOY.md`.
 
 ## 1. Prepare release
 
@@ -56,7 +56,7 @@ Before the first run:
 3. Require reviewers for that environment when practical.
 
 Pushing a `vX.Y.Z` tag starts the workflow. Manual fallback commands and
-first-publication details are documented in `docs/RELEASING_TUTORIAL.md`.
+first-publication details are documented in `docs/DEPLOY.md`.
 
 Published crate versions cannot be overwritten or deleted. A broken version can
 only be yanked, so do not publish until the dry run and release checks pass.
