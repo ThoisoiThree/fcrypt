@@ -219,15 +219,15 @@ fcrypt --help-all
 
 ```bash
 # Recommended commands
-fcrypt encrypt <INPUT> [-o <OUTPUT>]
-fcrypt decrypt <INPUT.bin> [-o <OUTPUT>]
+fcrypt encrypt <INPUT>... [-o <OUTPUT>]
+fcrypt decrypt <INPUT.bin>... [-o <OUTPUT>]
 fcrypt sign <INPUT.bin> --key <SIGNER.SEC>
 fcrypt verify <INPUT.bin> --key <SIGNER.PUB>
 fcrypt identity create <NAME>
 fcrypt identity list
 fcrypt identity inspect <KEY>
-fcrypt password generate --length <N>
-fcrypt phrase generate --words <N>
+fcrypt password generate [--length <N>]
+fcrypt phrase generate [--words <N>]
 
 # Compatibility commands
 fcrypt asym ...
@@ -258,11 +258,25 @@ The output is:
 report.pdf.bin
 ```
 
+Each completed file is reported with its size and elapsed time:
+
+```text
+Encrypted report.pdf → report.pdf.bin (12.4 MiB, 1.8s)
+```
+
+Encrypting with a password shorter than 12 characters prints a warning (also
+listed under `warnings` in `--json` output).
+
 Decrypt:
 
 ```bash
 fcrypt decrypt report.pdf.bin
 ```
+
+If decryption fails, the error explains what to check: the password (or that
+the file may need `--identity` if it was encrypted for a recipient key), or, in
+key-file mode, that the key file must be byte-for-byte identical and the
+optional password must match.
 
 Equivalent alias:
 
@@ -282,6 +296,24 @@ Choose a specific output path:
 fcrypt encrypt report.pdf --output archive.bin
 fcrypt decrypt archive.bin --output report-restored.pdf
 ```
+
+Several files can be processed in one command. Credentials are requested
+once, every overwrite question is asked before any work starts, and each file
+gets its usual `<INPUT>.bin` (or decrypted) name. `--output` is only allowed
+with a single input, and `--new-identity` requires a single input; use
+`identity create` and `--recipient` for several files.
+
+```bash
+fcrypt encrypt *.pdf
+fcrypt decrypt *.pdf.bin
+fcrypt encrypt a.txt b.txt --recipient ./alice_recipient_default.pub
+```
+
+Each file is still encrypted independently with its own salt, so the password
+KDF runs once per file. Processing stops at the first failing file; files
+completed before it are kept, and the error names the failing input. With
+`--json`, a multi-file result lists files under `files` instead of the
+top-level `input`/`output` fields.
 
 For automation, read a password from a protected file. A single trailing LF or
 CRLF is removed; other whitespace remains part of the password:
@@ -562,13 +594,14 @@ accepted for compatibility and still requires a verification key.
 ### Random password
 
 ```bash
-fcrypt password generate --length 32
-fcrypt password generate --length 32 -c
-fcrypt password generate --length 32 -b
+fcrypt password generate
+fcrypt password generate --length 48
+fcrypt password generate -c
+fcrypt password generate -b
 ```
 
 `password generate` writes a random password with `N` characters to stdout followed by
-a newline. `N` must be between 1 and 4096.
+a newline. `N` defaults to 32 and must be between 1 and 4096.
 `-c`/`--compatible` restricts special characters to the widely accepted
 `!@#$%^&*_-+=` set. `-b`/`--base64` Base64-encodes the generated password
 before writing it. The legacy `-b64` spelling remains accepted.
@@ -585,8 +618,11 @@ A-Z a-z 0-9 ! # $ % & ( ) * + , - . / : ; < = > ? @ [ ] ^ _ { | } ~
 Generate a phrase from the embedded EFF large wordlist:
 
 ```bash
-fcrypt phrase generate --words 7
+fcrypt phrase generate
+fcrypt phrase generate --words 10
 ```
+
+The word count defaults to 7 and must be between 1 and 128.
 
 Use a custom separator:
 

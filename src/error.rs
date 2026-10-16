@@ -65,13 +65,21 @@ pub enum AppError {
     #[error("Decryption failed: wrong password or file is corrupted.")]
     DecryptionFailed,
 
-    #[error("This file should be decrypted with asymmetric mode.\nUse: fcrypt asym decrypt {0} -i <recipient_default.sec>")]
-    SymmetricCommandUsedForFe(String),
+    #[error(
+        "Decryption failed: wrong password or file is corrupted.\nIf the file was encrypted for a recipient key, use: fcrypt decrypt <FILE> --identity <recipient_default.sec>"
+    )]
+    PasswordDecryptionFailed,
 
     #[error(
-        "This file could not be opened as an asymmetric opaque file.\nUse the symmetric command if this is a password-encrypted file:\n  fcrypt decrypt {0}"
+        "Decryption failed: wrong key file or password, or file is corrupted.\nThe key file must be byte-for-byte identical to the one used for encryption, and the optional password must match (leave it empty only if none was set)."
     )]
-    NotAsymmetricFile(String),
+    KeyFileDecryptionFailed,
+
+    #[error("{input}: {source}")]
+    BatchFile {
+        input: PathBuf,
+        source: Box<AppError>,
+    },
 
     #[error("Asymmetric PQC mode was not enabled in this build.\nRebuild with feature: pqc")]
     AsymmetricUnavailable,
@@ -85,14 +93,16 @@ pub enum AppError {
     #[error("invalid asymmetric key file: {0}")]
     InvalidAsymmetricKeyFile(String),
 
-    #[error("No matching recipient secret key found.\nUse: fcrypt asym decrypt <file.bin> -i <recipient_default.sec>")]
+    #[error("No matching recipient secret key found.\nUse: fcrypt decrypt <FILE> --identity <recipient_default.sec>")]
     NoMatchingIdentity,
 
-    #[error("Multiple matching recipient secret keys found. Use -i <recipient_default.sec>.")]
+    #[error(
+        "Multiple matching recipient secret keys found. Use --identity <recipient_default.sec>."
+    )]
     MultipleMatchingIdentities,
 
     #[error(
-        "Too many recipient secret keys found ({found}); auto-discovery limit is {limit}. Use -i <recipient_default.sec> to select one key."
+        "Too many recipient secret keys found ({found}); auto-discovery limit is {limit}. Use --identity <recipient_default.sec> to select one key."
     )]
     TooManyRecipientIdentities { found: usize, limit: usize },
 

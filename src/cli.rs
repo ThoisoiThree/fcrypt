@@ -69,18 +69,18 @@ pub enum Command {
 
 #[derive(Debug, Args)]
 pub struct EncryptArgs {
-    /// Input file to encrypt.
+    /// Input files to encrypt. Credentials are requested once for all files.
     #[arg(value_name = "INPUT", required_unless_present = "input_flag")]
-    pub input: Option<PathBuf>,
+    pub inputs: Vec<PathBuf>,
     /// Input file to encrypt.
     #[arg(
         long = "input",
         short = 'i',
         value_name = "FILE",
-        conflicts_with = "input"
+        conflicts_with = "inputs"
     )]
     pub input_flag: Option<PathBuf>,
-    /// Destination file. Defaults to <INPUT>.bin.
+    /// Destination file for a single input. Defaults to <INPUT>.bin.
     #[arg(long, short = 'o', value_name = "FILE")]
     pub output: Option<PathBuf>,
     /// Encrypt for this recipient public key instead of using a password.
@@ -130,8 +130,8 @@ pub struct EncryptArgs {
 }
 
 impl EncryptArgs {
-    pub fn input_path(&self) -> Result<PathBuf> {
-        resolve_input(self.input.as_ref(), self.input_flag.as_ref())
+    pub fn input_paths(&self) -> Result<Vec<PathBuf>> {
+        resolve_inputs(&self.inputs, self.input_flag.as_ref())
     }
 
     pub fn uses_pqc(&self) -> bool {
@@ -145,13 +145,13 @@ impl EncryptArgs {
 
 #[derive(Debug, Args)]
 pub struct DecryptArgs {
-    /// Input file to decrypt.
+    /// Input files to decrypt. Credentials are requested once for all files.
     #[arg(value_name = "INPUT", required_unless_present = "input_flag")]
-    pub input: Option<PathBuf>,
+    pub inputs: Vec<PathBuf>,
     /// Input file to decrypt. Short -i is reserved for --identity.
-    #[arg(long = "input", value_name = "FILE", conflicts_with = "input")]
+    #[arg(long = "input", value_name = "FILE", conflicts_with = "inputs")]
     pub input_flag: Option<PathBuf>,
-    /// Destination file. Defaults to INPUT without .bin.
+    /// Destination file for a single input. Defaults to INPUT without .bin.
     #[arg(long, short = 'o', value_name = "FILE")]
     pub output: Option<PathBuf>,
     /// Recipient secret key bundle for asymmetric decryption.
@@ -193,8 +193,8 @@ pub struct DecryptArgs {
 }
 
 impl DecryptArgs {
-    pub fn input_path(&self) -> Result<PathBuf> {
-        resolve_input(self.input.as_ref(), self.input_flag.as_ref())
+    pub fn input_paths(&self) -> Result<Vec<PathBuf>> {
+        resolve_inputs(&self.inputs, self.input_flag.as_ref())
     }
 
     pub fn uses_pqc(&self) -> bool {
@@ -286,7 +286,8 @@ pub struct PasswordArgs {
 pub enum PasswordCommand {
     /// Generate a random password.
     Generate {
-        #[arg(long, short = 'l', value_name = "N")]
+        /// Password length in characters.
+        #[arg(long, short = 'l', value_name = "N", default_value_t = 32)]
         length: usize,
         /// Encode the generated password as Base64.
         #[arg(long = "base64", short = 'b')]
@@ -307,7 +308,8 @@ pub struct PhraseArgs {
 pub enum PhraseCommand {
     /// Generate a random phrase from the embedded EFF wordlist.
     Generate {
-        #[arg(long, short = 'w', value_name = "N")]
+        /// Number of words.
+        #[arg(long, short = 'w', value_name = "N", default_value_t = 7)]
         words: usize,
         #[arg(
             long = "separator",
@@ -346,11 +348,12 @@ pub enum KeygenCommand {
     },
 }
 
-fn resolve_input(positional: Option<&PathBuf>, flagged: Option<&PathBuf>) -> Result<PathBuf> {
+fn resolve_inputs(positional: &[PathBuf], flagged: Option<&PathBuf>) -> Result<Vec<PathBuf>> {
     match (positional, flagged) {
-        (Some(input), None) | (None, Some(input)) => Ok(input.clone()),
+        ([], Some(input)) => Ok(vec![input.clone()]),
+        ([_, ..], None) => Ok(positional.to_vec()),
         _ => Err(AppError::InvalidArgument(
-            "exactly one input path must be provided".to_string(),
+            "input files must be given either as arguments or with --input".to_string(),
         )),
     }
 }

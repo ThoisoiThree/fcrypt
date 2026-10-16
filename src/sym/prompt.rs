@@ -59,13 +59,14 @@ pub fn confirm_overwrite(path: &Path) -> Result<bool> {
         return Err(AppError::OutputExistsNonInteractive(path.to_path_buf()));
     }
 
-    let mut stdout = io::stdout();
+    // Prompts go to stderr so stdout stays reserved for requested data.
+    let mut stderr = io::stderr();
     write!(
-        stdout,
+        stderr,
         "Output file '{}' already exists. Overwrite? [y/N]: ",
         path.display()
     )?;
-    stdout.flush()?;
+    stderr.flush()?;
 
     let mut response = String::new();
     io::stdin().read_line(&mut response)?;

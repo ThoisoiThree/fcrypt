@@ -1,5 +1,6 @@
 use serde::Serialize;
 use std::io::{self, Write};
+use std::time::Duration;
 
 use crate::error::{AppError, Result};
 
@@ -22,6 +23,8 @@ pub struct OperationReport {
     pub output: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signature: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<FileReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub keys_dir: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -45,6 +48,7 @@ impl OperationReport {
             input: None,
             output: None,
             signature: None,
+            files: Vec::new(),
             keys_dir: None,
             generated_keys: Vec::new(),
             verified: None,
@@ -53,6 +57,15 @@ impl OperationReport {
             warnings: Vec::new(),
         }
     }
+}
+
+/// One processed file in a multi-input encrypt or decrypt report.
+#[derive(Debug, Serialize)]
+pub struct FileReport {
+    pub input: String,
+    pub output: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -90,6 +103,38 @@ pub fn emit_success(
     Ok(())
 }
 
+/// Print one human-readable line immediately, e.g. after each file of a batch.
+pub fn emit_line(options: OutputOptions, line: &str) {
+    if !options.json && !options.quiet {
+        println!("{line}");
+    }
+}
+
+/// Format a byte count with binary units, e.g. `12.4 MiB`.
+pub fn format_size(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["KiB", "MiB", "GiB", "TiB", "PiB"];
+    if bytes < 1024 {
+        return format!("{bytes} B");
+    }
+    let mut value = bytes as f64 / 1024.0;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    format!("{value:.1} {}", UNITS[unit])
+}
+
+/// Format an elapsed time, e.g. `0.4s` or `2m 05s`.
+pub fn format_duration(elapsed: Duration) -> String {
+    let secs = elapsed.as_secs();
+    if secs < 60 {
+        format!("{:.1}s", elapsed.as_secs_f64())
+    } else {
+        format!("{}m {:02}s", secs / 60, secs % 60)
+    }
+}
+
 pub fn emit_error(options: OutputOptions, error: &AppError) {
     if options.json {
         let report = ErrorReport {
@@ -113,12 +158,36 @@ fn error_kind(error: &AppError) -> &'static str {
         AppError::InvalidArgument(_) | AppError::InputNotRegularFile(_) => "invalid_argument",
         AppError::OutputExists(_) | AppError::OutputExistsNonInteractive(_) => "output_exists",
         AppError::PasswordMismatch | AppError::EmptyPassword => "password",
-        AppError::DecryptionFailed | AppError::AsymmetricAuthenticationFailed => "authentication",
+        AppError::DecryptionFailed
+        | AppError::PasswordDecryptionFailed
+        | AppError::KeyFileDecryptionFailed
+        | AppError::AsymmetricAuthenticationFailed => "authentication",
         AppError::DecryptionMemoryLimitExceeded { .. } => "resource_limit",
         AppError::SignatureRequired
         | AppError::SignatureVerificationKeyRequired
         | AppError::SignatureVerificationFailed => "signature",
         AppError::AsymmetricUnavailable => "asymmetric_unavailable",
+        AppError::BatchFile { source, .. } => error_kind(source),
         _ => "operation_failed",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sizes_use_binary_units() {
+        assert_eq!(format_size(0), "0 B");
+        assert_eq!(format_size(1023), "1023 B");
+        assert_eq!(format_size(1024), "1.0 KiB");
+        assert_eq!(format_size(13 * 1024 * 1024 - 600 * 1024), "12.4 MiB");
+        assert_eq!(format_size(3 * 1024 * 1024 * 1024), "3.0 GiB");
+    }
+
+    #[test]
+    fn durations_switch_to_minutes() {
+        assert_eq!(format_duration(Duration::from_millis(1800)), "1.8s");
+        assert_eq!(format_duration(Duration::from_secs(125)), "2m 05s");
     }
 }

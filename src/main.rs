@@ -6,6 +6,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use fcrypt::asym;
 use fcrypt::asym::cli::{AssymCommand, AssymDecryptArgs, AssymEncryptArgs, AssymSignArgs};
@@ -15,7 +16,7 @@ use fcrypt::cli::{
 };
 use fcrypt::error::{AppError, Result};
 use fcrypt::keygen;
-use fcrypt::output::{self, OperationReport, OutputOptions};
+use fcrypt::output::{self, FileReport, OperationReport, OutputOptions};
 use fcrypt::sym::crypto::CryptoConfig;
 use fcrypt::sym::{file_ops, input, key_file, overwrite, password_file, pathing, progress, prompt};
 
@@ -88,8 +89,8 @@ fn print_help_all() {
         "fcrypt command reference
 
 Password encryption:
-  fcrypt encrypt <INPUT> [-o <OUTPUT>]
-  fcrypt decrypt <INPUT.bin> [-o <OUTPUT>]
+  fcrypt encrypt <INPUT>... [-o <OUTPUT>]          (-o only with one input)
+  fcrypt decrypt <INPUT.bin>... [-o <OUTPUT>]
   fcrypt encrypt <INPUT> --password-file <FILE>
   fcrypt encrypt <INPUT> --key-file <ANY_FILE>      (short: -K; optional password, Enter skips)
   fcrypt decrypt <INPUT.bin> --key-file <ANY_FILE>
@@ -111,8 +112,8 @@ Identity management:
   fcrypt identity inspect <KEY>
 
 Secret generation:
-  fcrypt password generate --length 32
-  fcrypt phrase generate --words 7 --separator -
+  fcrypt password generate [--length 32]
+  fcrypt phrase generate [--words 7] [--separator -]
 
 Automation:
   --json          emit one JSON result to stdout
@@ -126,55 +127,230 @@ Compatibility commands remain available:
     );
 }
 
-fn run_encrypt(args: EncryptArgs, config: &CryptoConfig, options: OutputOptions) -> Result<()> {
-    let input = args.input_path()?;
-    input::reject_non_regular_file(&input)?;
-    let output = args
-        .output
-        .clone()
-        .map(Ok)
-        .unwrap_or_else(|| pathing::encryption_output_path(&input))?;
-    let allow_overwrite = resolve_overwrite(&output, args.force, options)?;
+/// One input/output pair of an encrypt or decrypt invocation.
+struct FileJob {
+    input: PathBuf,
+    output: PathBuf,
+    allow_overwrite: bool,
+}
 
-    if !args.uses_pqc() {
-        let (password, mode, warnings) = encryption_secret(
-            args.password_file.as_deref(),
-            args.key_file.as_deref(),
-            &input,
-            &output,
-        )?;
-        let total = fs::metadata(&input)?.len();
-        let pb = progress::create_progress(total, "Encrypting", progress_enabled(options));
-        let result = file_ops::encrypt_file(
-            &input,
-            &output,
+/// A finished file, used for the human summary line and the report.
+struct Completed {
+    input: PathBuf,
+    output: PathBuf,
+    signature: Option<PathBuf>,
+    bytes: u64,
+    elapsed: Duration,
+}
+
+/// Resolve outputs and overwrite decisions for every input before any
+/// credential is requested, so a batch never stops halfway for a prompt.
+fn plan_jobs(
+    inputs: Vec<PathBuf>,
+    output: Option<PathBuf>,
+    default_output: fn(&Path) -> Result<PathBuf>,
+    force: bool,
+    options: OutputOptions,
+) -> Result<Vec<FileJob>> {
+    if output.is_some() && inputs.len() > 1 {
+        return Err(AppError::InvalidArgument(
+            "--output can only be used with a single input file".to_string(),
+        ));
+    }
+    let mut outputs = Vec::with_capacity(inputs.len());
+    for input in &inputs {
+        input::reject_non_regular_file(input)?;
+        outputs.push(match &output {
+            Some(output) => output.clone(),
+            None => default_output(input)?,
+        });
+    }
+    if inputs.len() > 1 {
+        reject_batch_collisions(&inputs, &outputs)?;
+    }
+    let mut jobs = Vec::with_capacity(inputs.len());
+    for (input, output) in inputs.into_iter().zip(outputs) {
+        let allow_overwrite = resolve_overwrite(&output, force, options)?;
+        jobs.push(FileJob {
+            input,
+            output,
+            allow_overwrite,
+        });
+    }
+    Ok(jobs)
+}
+
+fn reject_batch_collisions(inputs: &[PathBuf], outputs: &[PathBuf]) -> Result<()> {
+    for (index, input) in inputs.iter().enumerate() {
+        if inputs[..index].contains(input) {
+            return Err(AppError::InvalidArgument(format!(
+                "input file listed more than once: {}",
+                input.display()
+            )));
+        }
+    }
+    for (index, output) in outputs.iter().enumerate() {
+        if outputs[..index].contains(output) {
+            return Err(AppError::InvalidArgument(format!(
+                "more than one input would be written to {}",
+                output.display()
+            )));
+        }
+        if inputs.contains(output) {
+            return Err(AppError::InvalidArgument(format!(
+                "output {} is also an input file",
+                output.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Run `operation` for each job, printing a summary line after every file.
+/// Stops at the first failure; files completed before it are kept.
+fn run_jobs<F>(
+    jobs: &[FileJob],
+    verb: &str,
+    progress_label: &str,
+    options: OutputOptions,
+    mut operation: F,
+) -> Result<Vec<Completed>>
+where
+    F: FnMut(&FileJob, &progress::OperationProgress) -> Result<Completed>,
+{
+    let batch = jobs.len() > 1;
+    let mut completed = Vec::with_capacity(jobs.len());
+    for (index, job) in jobs.iter().enumerate() {
+        let total =
+            fs::metadata(&job.input).map_err(|error| batch_error(batch, job, error.into()))?;
+        let label = if batch {
+            format!("{progress_label} {}/{}", index + 1, jobs.len())
+        } else {
+            progress_label.to_string()
+        };
+        let pb = progress::create_progress(total.len(), &label, progress_enabled(options));
+        let result = operation(job, &pb);
+        pb.finish();
+        let done = result.map_err(|error| batch_error(batch, job, error))?;
+        output::emit_line(options, &completion_line(verb, &done));
+        if let Some(signature) = &done.signature {
+            output::emit_line(
+                options,
+                &format!("Detached signature: {}", signature.display()),
+            );
+        }
+        completed.push(done);
+    }
+    Ok(completed)
+}
+
+fn batch_error(batch: bool, job: &FileJob, error: AppError) -> AppError {
+    if batch {
+        AppError::BatchFile {
+            input: job.input.clone(),
+            source: Box::new(error),
+        }
+    } else {
+        error
+    }
+}
+
+fn completion_line(verb: &str, done: &Completed) -> String {
+    format!(
+        "{verb} {} → {} ({}, {})",
+        done.input.display(),
+        done.output.display(),
+        output::format_size(done.bytes),
+        output::format_duration(done.elapsed)
+    )
+}
+
+/// Fill the input/output fields for one file, or `files` for a batch, so
+/// single-file JSON reports keep their established shape.
+fn report_files(report: &mut OperationReport, completed: &[Completed]) {
+    match completed {
+        [done] => {
+            report.input = Some(done.input.display().to_string());
+            report.output = Some(done.output.display().to_string());
+            report.signature = done
+                .signature
+                .as_ref()
+                .map(|path| path.display().to_string());
+        }
+        _ => {
+            report.files = completed
+                .iter()
+                .map(|done| FileReport {
+                    input: done.input.display().to_string(),
+                    output: done.output.display().to_string(),
+                    signature: done
+                        .signature
+                        .as_ref()
+                        .map(|path| path.display().to_string()),
+                })
+                .collect();
+        }
+    }
+}
+
+fn push_unique(warnings: &mut Vec<String>, warning: String) {
+    if !warnings.contains(&warning) {
+        warnings.push(warning);
+    }
+}
+
+fn run_encrypt(args: EncryptArgs, config: &CryptoConfig, options: OutputOptions) -> Result<()> {
+    let inputs = args.input_paths()?;
+    if args.new_identity.is_some() && inputs.len() > 1 {
+        return Err(AppError::InvalidArgument(
+            "--new-identity supports a single input file; create the identity with `fcrypt identity create` and use --recipient for several files".to_string(),
+        ));
+    }
+    let jobs = plan_jobs(
+        inputs,
+        args.output.clone(),
+        pathing::encryption_output_path,
+        args.force,
+        options,
+    )?;
+
+    if args.uses_pqc() {
+        return run_pqc_encrypt(args, jobs, config, options);
+    }
+    let (password, mode, warnings) = encryption_secret(
+        args.password_file.as_deref(),
+        args.key_file.as_deref(),
+        &jobs,
+    )?;
+    let completed = run_jobs(&jobs, "Encrypted", "Encrypting", options, |job, pb| {
+        let bytes = fs::metadata(&job.input)?.len();
+        let started = Instant::now();
+        file_ops::encrypt_file(
+            &job.input,
+            &job.output,
             password.as_str(),
             config,
-            allow_overwrite,
+            job.allow_overwrite,
             |n| pb.inc(n),
-        );
-        pb.finish();
-        result?;
-        let mut report = OperationReport::new("encrypt");
-        report.mode = Some(mode);
-        report.input = Some(input.display().to_string());
-        report.output = Some(output.display().to_string());
-        report.warnings = warnings;
-        output::emit_success(
-            options,
-            &report,
-            &[format!("Encryption complete: {}", output.display())],
-        )
-    } else {
-        run_pqc_encrypt(args, input, output, allow_overwrite, config, options)
-    }
+        )?;
+        Ok(Completed {
+            input: job.input.clone(),
+            output: job.output.clone(),
+            signature: None,
+            bytes,
+            elapsed: started.elapsed(),
+        })
+    })?;
+    let mut report = OperationReport::new("encrypt");
+    report.mode = Some(mode);
+    report_files(&mut report, &completed);
+    report.warnings = warnings;
+    output::emit_success(options, &report, &[])
 }
 
 fn run_pqc_encrypt(
     args: EncryptArgs,
-    input: PathBuf,
-    output: PathBuf,
-    allow_overwrite: bool,
+    jobs: Vec<FileJob>,
     config: &CryptoConfig,
     options: OutputOptions,
 ) -> Result<()> {
@@ -183,76 +359,93 @@ fn run_pqc_encrypt(
             "--sign requires --sign-key or --new-identity in the unified command".to_string(),
         ));
     }
-
-    let keys_dir = args
-        .keys_dir
-        .clone()
-        .unwrap_or(pathing::asym_default_keys_dir_for_plain_input(&input)?);
-    let key_force = if let Some(name) = &args.new_identity {
-        resolve_named_key_overwrite(&keys_dir, name, args.force, options)?
-    } else {
-        false
-    };
     if args.recipient.is_none() && args.new_identity.is_none() {
         return Err(AppError::InvalidArgument(
             "asymmetric encryption requires --recipient or --new-identity".to_string(),
         ));
     }
+
+    // Resolve every overwrite question before generating keys or writing.
     let signing = args.sign || args.sign_key.is_some();
-    let detached_signature = signing
-        .then(|| asym::envelope::detached_signature_path(&output))
-        .transpose()?;
-    let signature_overwrite = if let Some(signature) = &detached_signature {
-        resolve_overwrite(signature, args.force, options)?
-    } else {
-        false
+    let mut prepared = Vec::with_capacity(jobs.len());
+    for job in &jobs {
+        let keys_dir = match &args.keys_dir {
+            Some(dir) => dir.clone(),
+            None => pathing::asym_default_keys_dir_for_plain_input(&job.input)?,
+        };
+        let signature_overwrite = if signing {
+            let signature = asym::envelope::detached_signature_path(&job.output)?;
+            resolve_overwrite(&signature, args.force, options)?
+        } else {
+            false
+        };
+        prepared.push((keys_dir, signature_overwrite));
+    }
+    let key_force = match &args.new_identity {
+        Some(name) => resolve_named_key_overwrite(&prepared[0].0, name, args.force, options)?,
+        None => false,
     };
 
-    let asym_args = AssymEncryptArgs {
-        input: input.clone(),
-        output: Some(output.clone()),
-        recipient_public: args.recipient,
-        keys_dir: Some(keys_dir.clone()),
-        sign: args.sign,
-        sign_key: args.sign_key,
-        force: args.force || allow_overwrite || signature_overwrite,
-    };
-    let total = fs::metadata(&input)?.len();
-    let pb = progress::create_progress(total, "Encrypting", progress_enabled(options));
-    let result = if let Some(name) = &args.new_identity {
-        asym::encrypt::encrypt_file_with_new_identity(&asym_args, name, key_force, config, |n| {
-            pb.inc(n)
+    let mut generated_keys = Vec::new();
+    let mut keys_dir_used = None;
+    let mut next = prepared.into_iter();
+    let completed = run_jobs(&jobs, "Encrypted", "Encrypting", options, |job, pb| {
+        let (keys_dir, signature_overwrite) = next.next().expect("one entry per job");
+        let asym_args = AssymEncryptArgs {
+            input: job.input.clone(),
+            output: Some(job.output.clone()),
+            recipient_public: args.recipient.clone(),
+            keys_dir: Some(keys_dir),
+            sign: args.sign,
+            sign_key: args.sign_key.clone(),
+            force: args.force || job.allow_overwrite || signature_overwrite,
+        };
+        let bytes = fs::metadata(&job.input)?.len();
+        let started = Instant::now();
+        let outcome = match &args.new_identity {
+            Some(name) => asym::encrypt::encrypt_file_with_new_identity(
+                &asym_args,
+                name,
+                key_force,
+                config,
+                |n| pb.inc(n),
+            )?,
+            None => asym::encrypt::encrypt_file(&asym_args, config, |n| pb.inc(n))?,
+        };
+        let elapsed = started.elapsed();
+        generated_keys.extend(
+            [
+                outcome.generated_recipient_public,
+                outcome.generated_recipient_secret,
+                outcome.generated_signer_public,
+                outcome.generated_signer_secret,
+            ]
+            .into_iter()
+            .flatten(),
+        );
+        keys_dir_used = Some(outcome.keys_dir);
+        Ok(Completed {
+            input: job.input.clone(),
+            output: outcome.output,
+            signature: outcome.detached_signature,
+            bytes,
+            elapsed,
         })
-    } else {
-        asym::encrypt::encrypt_file(&asym_args, config, |n| pb.inc(n))
-    };
-    pb.finish();
-    let outcome = result?;
-    let generated_keys = [
-        outcome.generated_recipient_public,
-        outcome.generated_recipient_secret,
-        outcome.generated_signer_public,
-        outcome.generated_signer_secret,
-    ]
-    .into_iter()
-    .flatten()
-    .collect::<Vec<_>>();
+    })?;
+
     let mut report = OperationReport::new("encrypt");
     report.mode = Some("pqc");
-    report.input = Some(input.display().to_string());
-    report.output = Some(outcome.output.display().to_string());
-    report.signature = outcome
-        .detached_signature
-        .as_ref()
-        .map(|path| path.display().to_string());
-    report.keys_dir = Some(outcome.keys_dir.display().to_string());
+    report_files(&mut report, &completed);
+    report.keys_dir = keys_dir_used.map(|dir| dir.display().to_string());
     report.generated_keys = generated_keys
         .iter()
         .map(|path| path.display().to_string())
         .collect();
-    let mut lines = vec![format!("Encryption complete: {}", outcome.output.display())];
+    let mut lines = Vec::new();
     if !generated_keys.is_empty() {
-        lines.push(format!("Keys directory: {}", keys_dir.display()));
+        if let Some(keys_dir) = &report.keys_dir {
+            lines.push(format!("Keys directory: {keys_dir}"));
+        }
         if let Some(secret) = generated_keys.iter().find(|path| {
             path.file_name()
                 .and_then(|name| name.to_str())
@@ -264,92 +457,98 @@ fn run_pqc_encrypt(
             );
         }
     }
-    if let Some(signature) = &outcome.detached_signature {
-        lines.push(format!("Detached signature: {}", signature.display()));
-    }
     output::emit_success(options, &report, &lines)
 }
 
 fn run_decrypt(args: DecryptArgs, config: &CryptoConfig, options: OutputOptions) -> Result<()> {
-    let input = args.input_path()?;
-    input::reject_non_regular_file(&input)?;
-    let output = args
-        .output
-        .clone()
-        .map(Ok)
-        .unwrap_or_else(|| pathing::decryption_output_path(&input))?;
-    let allow_overwrite = resolve_overwrite(&output, args.force, options)?;
+    let jobs = plan_jobs(
+        args.input_paths()?,
+        args.output.clone(),
+        pathing::decryption_output_path,
+        args.force,
+        options,
+    )?;
     if !args.uses_pqc() {
         let (password, mode, warnings) = decryption_secret(
             args.password_file.as_deref(),
             args.key_file.as_deref(),
-            &input,
-            &output,
+            &jobs,
         )?;
-        let total = fs::metadata(&input)?.len();
-        let pb = progress::create_progress(total, "Decrypting", progress_enabled(options));
-        let result = file_ops::decrypt_file(
-            &input,
-            &output,
-            password.as_str(),
-            config,
-            allow_overwrite,
-            |n| pb.inc(n),
-        );
-        pb.finish();
-        result?;
+        let completed = run_jobs(&jobs, "Decrypted", "Decrypting", options, |job, pb| {
+            let started = Instant::now();
+            file_ops::decrypt_file(
+                &job.input,
+                &job.output,
+                password.as_str(),
+                config,
+                job.allow_overwrite,
+                |n| pb.inc(n),
+            )
+            .map_err(|error| match (error, mode) {
+                (AppError::DecryptionFailed, "key_file") => AppError::KeyFileDecryptionFailed,
+                (AppError::DecryptionFailed, _) => AppError::PasswordDecryptionFailed,
+                (error, _) => error,
+            })?;
+            Ok(Completed {
+                input: job.input.clone(),
+                output: job.output.clone(),
+                signature: None,
+                bytes: fs::metadata(&job.output)?.len(),
+                elapsed: started.elapsed(),
+            })
+        })?;
         let mut report = OperationReport::new("decrypt");
         report.mode = Some(mode);
-        report.input = Some(input.display().to_string());
-        report.output = Some(output.display().to_string());
+        report_files(&mut report, &completed);
         report.warnings = warnings;
-        output::emit_success(
-            options,
-            &report,
-            &[format!("Decryption complete: {}", output.display())],
-        )
-    } else {
-        let mut warnings = Vec::new();
+        return output::emit_success(options, &report, &[]);
+    }
+
+    let mut warnings = Vec::new();
+    let completed = run_jobs(&jobs, "Decrypted", "Decrypting", options, |job, pb| {
         let asym_args = AssymDecryptArgs {
-            input: input.clone(),
-            output: Some(output.clone()),
-            identity: args.identity,
-            keys_dir: args.keys_dir,
-            verify: args.verify,
+            input: job.input.clone(),
+            output: Some(job.output.clone()),
+            identity: args.identity.clone(),
+            keys_dir: args.keys_dir.clone(),
+            verify: args.verify.clone(),
             require_signature: args.require_signature,
-            force: args.force || allow_overwrite,
+            force: args.force || job.allow_overwrite,
         };
-        let total = fs::metadata(&input)?.len();
-        let pb = progress::create_progress(total, "Decrypting", progress_enabled(options));
-        let result = asym::decrypt::decrypt_file_with_diagnostics(&asym_args, |n| pb.inc(n));
-        pb.finish();
-        let outcome = result?;
+        let started = Instant::now();
+        let outcome = asym::decrypt::decrypt_file_with_diagnostics(&asym_args, |n| pb.inc(n))?;
+        let elapsed = started.elapsed();
         if outcome.recipient_key_expired {
-            warnings.push("recipient key is expired; using it for archival decryption".to_string());
+            push_unique(
+                &mut warnings,
+                "recipient key is expired; using it for archival decryption".to_string(),
+            );
         }
         if outcome.signer_key_expired {
-            warnings.push(
+            push_unique(
+                &mut warnings,
                 "signing key is expired; historical signature verification is allowed".to_string(),
             );
         }
-        warnings.extend(
-            outcome
-                .skipped_identity_files
-                .iter()
-                .map(|path| format!("skipped invalid key file {}", path.display())),
-        );
-        let output = outcome.output;
-        let mut report = OperationReport::new("decrypt");
-        report.mode = Some("pqc");
-        report.input = Some(input.display().to_string());
-        report.output = Some(output.display().to_string());
-        report.warnings = warnings;
-        output::emit_success(
-            options,
-            &report,
-            &[format!("Decryption complete: {}", output.display())],
-        )
-    }
+        for path in &outcome.skipped_identity_files {
+            push_unique(
+                &mut warnings,
+                format!("skipped invalid key file {}", path.display()),
+            );
+        }
+        Ok(Completed {
+            input: job.input.clone(),
+            bytes: fs::metadata(&outcome.output)?.len(),
+            output: outcome.output,
+            signature: None,
+            elapsed,
+        })
+    })?;
+    let mut report = OperationReport::new("decrypt");
+    report.mode = Some("pqc");
+    report_files(&mut report, &completed);
+    report.warnings = warnings;
+    output::emit_success(options, &report, &[])
 }
 
 fn run_sign(args: SignArgs, options: OutputOptions) -> Result<()> {
@@ -650,29 +849,29 @@ enum Direction {
     Decrypt,
 }
 
+/// Shorter passwords trigger a warning when encrypting with a password only.
+const RECOMMENDED_MIN_PASSWORD_CHARS: usize = 12;
+
 fn encryption_secret(
     password_path: Option<&Path>,
     key_path: Option<&Path>,
-    input: &Path,
-    output: &Path,
+    jobs: &[FileJob],
 ) -> Result<SymmetricSecret> {
-    symmetric_secret(password_path, key_path, input, output, Direction::Encrypt)
+    symmetric_secret(password_path, key_path, jobs, Direction::Encrypt)
 }
 
 fn decryption_secret(
     password_path: Option<&Path>,
     key_path: Option<&Path>,
-    input: &Path,
-    output: &Path,
+    jobs: &[FileJob],
 ) -> Result<SymmetricSecret> {
-    symmetric_secret(password_path, key_path, input, output, Direction::Decrypt)
+    symmetric_secret(password_path, key_path, jobs, Direction::Decrypt)
 }
 
 fn symmetric_secret(
     password_path: Option<&Path>,
     key_path: Option<&Path>,
-    input: &Path,
-    output: &Path,
+    jobs: &[FileJob],
     direction: Direction,
 ) -> Result<SymmetricSecret> {
     let mut warnings = Vec::new();
@@ -688,11 +887,20 @@ fn symmetric_secret(
                 Direction::Decrypt => prompt::prompt_password_for_decryption()?,
             },
         };
+        if matches!(direction, Direction::Encrypt)
+            && password.chars().count() < RECOMMENDED_MIN_PASSWORD_CHARS
+        {
+            warnings.push(format!(
+                "password is shorter than {RECOMMENDED_MIN_PASSWORD_CHARS} characters; consider a longer one, e.g. from `fcrypt phrase generate`"
+            ));
+        }
         return Ok((password, "password", warnings));
     };
 
     // Validate and hash the key file before asking for the optional password.
-    key_file::reject_key_file_reuse(key_path, input, output)?;
+    for job in jobs {
+        key_file::reject_key_file_reuse(key_path, &job.input, &job.output)?;
+    }
     let mut key = key_file::read_key_file(key_path)?;
     warnings.extend(key.warning.take());
     let password = match password_path {

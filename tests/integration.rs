@@ -1313,9 +1313,7 @@ fn new_identity_encryption_publishes_usable_keys_and_signature() {
                 assert!(report["signature"].is_string());
             }
             "--quiet" => assert!(result.is_empty()),
-            _ => assert!(String::from_utf8(result)
-                .unwrap()
-                .contains("Encryption complete")),
+            _ => assert!(String::from_utf8(result).unwrap().contains("Encrypted ")),
         }
         asym::decrypt::decrypt_file(
             &AssymDecryptArgs {
@@ -2558,4 +2556,254 @@ fn interrupted_decryption_removes_staged_plaintext() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("Interrupted"));
     assert!(staged_temp_files(dir.path()).is_empty());
     assert!(!decrypted.exists());
+}
+
+#[test]
+fn multiple_inputs_share_one_password_and_report_each_file() {
+    let dir = tempdir().expect("tempdir must be created");
+    let first = dir.path().join("first.txt");
+    let second = dir.path().join("second.txt");
+    let password = dir.path().join("password.txt");
+    fs::write(&first, b"first secret").expect("input must be written");
+    fs::write(&second, b"second secret").expect("input must be written");
+    fs::write(&password, b"batch password long\n").expect("password must be written");
+
+    fcrypt_cmd()
+        .args(["encrypt", path_str(&first), path_str(&second)])
+        .args(["--password-file", path_str(&password)])
+        .assert()
+        .success()
+        .stdout(contains("Encrypted ").count(2))
+        .stdout(contains("first.txt.bin ("))
+        .stdout(contains("second.txt.bin ("));
+    fs::remove_file(&first).expect("plaintext must be removed");
+    fs::remove_file(&second).expect("plaintext must be removed");
+
+    let output = fcrypt_cmd()
+        .args(["--json", "decrypt"])
+        .arg(dir.path().join("first.txt.bin"))
+        .arg(dir.path().join("second.txt.bin"))
+        .args(["--password-file", path_str(&password)])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let report: serde_json::Value = serde_json::from_slice(&output).expect("JSON must parse");
+    assert_eq!(report["operation"], "decrypt");
+    assert_eq!(report["files"].as_array().map(Vec::len), Some(2));
+    assert!(report.get("input").is_none());
+    assert_eq!(
+        fs::read(&first).expect("plaintext must read"),
+        b"first secret"
+    );
+    assert_eq!(
+        fs::read(&second).expect("plaintext must read"),
+        b"second secret"
+    );
+}
+
+#[test]
+fn batch_stops_at_failed_file_and_names_it() {
+    let dir = tempdir().expect("tempdir must be created");
+    let good = dir.path().join("good.txt");
+    let other = dir.path().join("other.txt");
+    let password = dir.path().join("password.txt");
+    let wrong = dir.path().join("wrong.txt");
+    fs::write(&good, b"good").expect("input must be written");
+    fs::write(&other, b"other").expect("input must be written");
+    fs::write(&password, b"right password here").expect("password must be written");
+    fs::write(&wrong, b"another password here").expect("password must be written");
+    for (input, secret) in [(&good, &password), (&other, &wrong)] {
+        fcrypt_cmd()
+            .args(["-q", "encrypt", path_str(input), "--password-file"])
+            .arg(secret)
+            .assert()
+            .success();
+    }
+    fs::remove_file(&good).expect("plaintext must be removed");
+    fs::remove_file(&other).expect("plaintext must be removed");
+
+    fcrypt_cmd()
+        .arg("decrypt")
+        .arg(dir.path().join("good.txt.bin"))
+        .arg(dir.path().join("other.txt.bin"))
+        .args(["--password-file", path_str(&password)])
+        .assert()
+        .failure()
+        .stdout(contains("Decrypted "))
+        .stderr(contains("other.txt.bin: Decryption failed"));
+    assert_eq!(fs::read(&good).expect("first file must be kept"), b"good");
+    assert!(!other.exists());
+    assert!(staged_temp_files(dir.path()).is_empty());
+}
+
+#[test]
+fn invalid_batches_are_rejected_before_writing() {
+    let dir = tempdir().expect("tempdir must be created");
+    let first = dir.path().join("a.txt");
+    let second = dir.path().join("b.txt");
+    let password = dir.path().join("password.txt");
+    fs::write(&first, b"a").expect("input must be written");
+    fs::write(&second, b"b").expect("input must be written");
+    fs::write(&password, b"long enough password").expect("password must be written");
+    let out = dir.path().join("out.bin");
+
+    let cases: [(Vec<&str>, &str); 3] = [
+        (
+            vec![
+                path_str(&first),
+                path_str(&second),
+                "-o",
+                path_str(&out),
+                "--password-file",
+                path_str(&password),
+            ],
+            "--output can only be used with a single input",
+        ),
+        (
+            vec![
+                path_str(&first),
+                path_str(&first),
+                "--password-file",
+                path_str(&password),
+            ],
+            "listed more than once",
+        ),
+        (
+            vec![path_str(&first), path_str(&second), "--new-identity", "x"],
+            "--new-identity supports a single input",
+        ),
+    ];
+    for (args, message) in cases {
+        fcrypt_cmd()
+            .arg("encrypt")
+            .args(&args)
+            .assert()
+            .failure()
+            .stderr(contains(message));
+    }
+    assert!(!out.exists());
+    assert!(!dir.path().join("a.txt.bin").exists());
+    assert!(!dir.path().join("b.txt.bin").exists());
+}
+
+#[test]
+fn short_encryption_password_produces_a_warning() {
+    let dir = tempdir().expect("tempdir must be created");
+    let input = dir.path().join("input.txt");
+    let short = dir.path().join("short.txt");
+    fs::write(&input, b"data").expect("input must be written");
+    fs::write(&short, b"hunter2\n").expect("password must be written");
+
+    fcrypt_cmd()
+        .args([
+            "encrypt",
+            path_str(&input),
+            "--password-file",
+            path_str(&short),
+        ])
+        .assert()
+        .success()
+        .stderr(contains("Warning: password is shorter than 12 characters"));
+    fcrypt_cmd()
+        .args(["--json", "decrypt"])
+        .arg(dir.path().join("input.txt.bin"))
+        .args(["-o"])
+        .arg(dir.path().join("plain.txt"))
+        .args(["--password-file", path_str(&short)])
+        .assert()
+        .success()
+        .stdout(contains("shorter than").not());
+
+    let output = fcrypt_cmd()
+        .args(["--json", "encrypt", path_str(&input), "-f"])
+        .args(["--password-file", path_str(&short)])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let report: serde_json::Value = serde_json::from_slice(&output).expect("JSON must parse");
+    assert!(report["warnings"]
+        .as_array()
+        .expect("warnings must be present")
+        .iter()
+        .any(|warning| warning
+            .as_str()
+            .is_some_and(|warning| warning.contains("shorter than 12"))));
+    assert!(!String::from_utf8_lossy(&output).contains("hunter2"));
+}
+
+#[test]
+fn failed_symmetric_decryption_explains_what_to_check() {
+    let dir = tempdir().expect("tempdir must be created");
+    let input = dir.path().join("input.txt");
+    let encrypted = dir.path().join("cipher.bin");
+    let password = dir.path().join("password.txt");
+    let wrong = dir.path().join("wrong.txt");
+    let key = dir.path().join("key");
+    fs::write(&input, b"secret").expect("input must be written");
+    fs::write(&password, b"correct horse battery").expect("password must be written");
+    fs::write(&wrong, b"incorrect horse battery").expect("password must be written");
+    fs::write(&key, b"key material").expect("key must be written");
+
+    fcrypt_cmd()
+        .args([
+            "-q",
+            "encrypt",
+            path_str(&input),
+            "-o",
+            path_str(&encrypted),
+        ])
+        .args(["--password-file", path_str(&password)])
+        .assert()
+        .success();
+    fcrypt_cmd()
+        .args(["decrypt", path_str(&encrypted), "-o"])
+        .arg(dir.path().join("a.txt"))
+        .args(["--password-file", path_str(&wrong)])
+        .assert()
+        .failure()
+        .stderr(contains("wrong password"))
+        .stderr(contains("--identity"));
+    fcrypt_cmd()
+        .args(["decrypt", path_str(&encrypted), "-o"])
+        .arg(dir.path().join("b.txt"))
+        .args(["-K", path_str(&key)])
+        .assert()
+        .failure()
+        .stderr(contains("byte-for-byte identical"));
+    let output = fcrypt_cmd()
+        .args(["--json", "decrypt", path_str(&encrypted), "-o"])
+        .arg(dir.path().join("c.txt"))
+        .args(["-K", path_str(&key)])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let report: serde_json::Value = serde_json::from_slice(&output).expect("JSON must parse");
+    assert_eq!(report["error"]["kind"], "authentication");
+}
+
+#[test]
+fn secret_generators_have_default_sizes() {
+    let password = fcrypt_cmd()
+        .args(["password", "generate"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert_eq!(password.len(), 33);
+    let phrase = fcrypt_cmd()
+        .args(["phrase", "generate"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let phrase = String::from_utf8(phrase).expect("phrase must be utf-8");
+    assert_eq!(phrase.trim_end().split('-').count(), 7);
 }

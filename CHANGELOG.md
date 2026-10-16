@@ -7,6 +7,38 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- `encrypt` and `decrypt` accept several input files (`fcrypt encrypt *.pdf`).
+  The password or key file is requested once and all overwrite questions are
+  asked before any file is processed. Processing stops at the first failing
+  file and the error names it; earlier files are kept. `--output` and
+  `--new-identity` remain single-input options. Multi-file `--json` reports
+  list results under `files`; single-file reports are unchanged.
+- Success messages now show sizes and elapsed time, for example
+  `Encrypted report.pdf → report.pdf.bin (12.4 MiB, 1.8s)`. This replaces
+  `Encryption complete: …` / `Decryption complete: …` for `encrypt` and
+  `decrypt`.
+- Warn when encrypting with a password shorter than 12 characters.
+- `password generate` defaults to 32 characters and `phrase generate` to
+  7 words; `--length` and `--words` are now optional.
+
+### Changed
+
+- Failed password decryption suggests `--identity` for files encrypted to a
+  recipient key; failed key-file decryption explains that the key file must be
+  byte-for-byte identical and the optional password must match.
+- Recipient-key errors now suggest `fcrypt decrypt … --identity …` instead of
+  the legacy `fcrypt asym decrypt … -i …`.
+- Removed the unused `AppError::SymmetricCommandUsedForFe` and
+  `AppError::NotAsymmetricFile` library variants, and added
+  `PasswordDecryptionFailed`, `KeyFileDecryptionFailed`, and `BatchFile`.
+  `EncryptArgs`/`DecryptArgs` now expose `inputs` and `input_paths()`.
+
+### Fixed
+
+- The overwrite confirmation prompt is written to stderr instead of stdout.
+
 ## [0.3.6] - 2026-09-24
 
 ### Added
